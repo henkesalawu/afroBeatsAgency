@@ -24,7 +24,7 @@
 			<i class="fas fa-phone-alt"></i> {% if venue.phone %}{{ venue.phone }}{% else %}No Phone{% endif %}
 		</p>
 		<p>
-			<i class="fas fa-link"></i> {% if venue.website %}<a href="{{ venue.website }}" target="_blank">{{ venue.website }}</a>{% else %}No Website{% endif %}
+			<i class="fas fa-link"></i> {% if venue.website %}<a href="{{ venue.website_link }}" target="_blank">{{ venue.website_link }}</a>{% else %}No Website{% endif %}
 		</p>
 		<p>
 			<i class="fab fa-facebook-f"></i> {% if venue.facebook_link %}<a href="{{ venue.facebook_link }}" target="_blank">{{ venue.facebook_link }}</a>{% else %}No Facebook Link{% endif %}
@@ -74,8 +74,23 @@
 		{% endfor %}
 	</div>
 </section>
-
 <a href="/venues/{{ venue.id }}/edit"><button class="btn btn-primary btn-lg">Edit</button></a>
+<button id="delete_venue" onclick="deleteVenue(event)" class="btn btn-primary btn-lg" data-id="{{ venue.id }}">Delete Venue</button>
+
+<script>
+	function deleteVenue(event) {
+	  const venue_id = event.target.dataset.id
+	  fetch(`/venues/${venue_id}`, {
+		method: 'DELETE'
+	  })
+		.then(response => {
+		  window.location.href = response.url;
+		})
+		.catch(error => {
+		  console.log(error);
+		})
+	}
+	</script>
 
 {% endblock %}
 
