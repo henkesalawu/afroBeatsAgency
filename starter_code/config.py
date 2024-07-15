@@ -10,5 +10,7 @@ DEBUG = True
 
 
 # TODO IMPLEMENT DATABASE URL
-SQLALCHEMY_DATABASE_URI = 'postgresql://postgres:postgres@localhost:5432/fyyurapp'
+database_name = 'fyyurapp'
+database_path = 'postgresql://{}/{}'.format('localhost:5432', database_name)
+SQLALCHEMY_DATABASE_URI = database_path
 SQLALCHEMY_TRACK_MODIFICATIONS = False
