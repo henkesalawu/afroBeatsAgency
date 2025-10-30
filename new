@@ -1,3 +1,630 @@
+import { marked } from 'marked';
+import htmlToPdfmake from 'html-to-pdfmake';
+
+/** Inserts zero-width spaces into long strings for wrapping */
+function insertZeroWidthSpaces(text, maxLength = 20) {
+  if (!text) return '';
+  const regex = new RegExp(`(.{${maxLength}})`, 'g');
+  return text.replace(regex, '$1\u200B');
+}
+
+/** Formats date string to readable format */
+function formatDateTime(dateString) {
+  if (!dateString) return 'N/A';
+  try {
+    const date = new Date(dateString);
+    return date.toLocaleString('en-GB', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  } catch {
+    return dateString;
+  }
+}
+
+/** Detects if text is a conversation transcript */
+function isConversationFormat(text) {
+  if (!text) return false;
+  // Look for patterns like "Agent 00:02" or "Customer 00:10"
+  const conversationPattern = /^(Agent|Customer|User|Assistant|AI|Human)\s+\d+:\d+/m;
+  return conversationPattern.test(text);
+}
+
+/** Formats conversation transcript for better readability */
+function formatConversation(text) {
+  if (!text) return [{ text: 'No conversation content', color: '#888888', italics: true }];
+  
+  const lines = text.split('\n');
+  const formattedLines = [];
+  
+  for (let line of lines) {
+    line = line.trim();
+    if (!line) continue;
+    
+    // Check if line starts with participant and timestamp pattern
+    const speakerMatch = line.match(/^(Agent|Customer|User|Assistant|AI|Human)\s+(\d+:\d+)\s*(.*)$/);
+    
+    if (speakerMatch) {
+      const [, participant, timestamp, message] = speakerMatch;
+      formattedLines.push({
+        margin: [0, 3, 0, 0],
+        stack: [
+          {
+            text: `${participant} (${timestamp})`,
+            bold: true,
+            fontSize: 11,
+            color: '#5A287D'
+          },
+          message ? {
+            text: message,
+            margin: [15, 1, 0, 0],
+            color: '#333333',
+            fontSize: 10
+          } : null
+        ].filter(item => item !== null)
+      });
+    } else {
+      // Handle continuation lines or metadata
+      const isMetadata = line.includes('Connected at') || 
+                        line.includes('Duration') || 
+                        line.includes('Queue') || 
+                        line.includes('Transfer') ||
+                        line.includes('endpoint') ||
+                        line.includes('ACW');
+      
+      if (isMetadata) {
+        // System metadata - smaller, gray text
+        formattedLines.push({
+          text: line,
+          fontSize: 9,
+          color: '#666666',
+          margin: [0, 1, 0, 1],
+          italics: true
+        });
+      } else if (formattedLines.length > 0) {
+        // Continuation of previous speaker message
+        const lastItem = formattedLines[formattedLines.length - 1];
+        if (lastItem.stack) {
+          lastItem.stack.push({
+            text: line,
+            margin: [15, 0, 0, 0],
+            color: '#333333',
+            fontSize: 10
+          });
+        }
+      } else {
+        // Standalone text at beginning
+        formattedLines.push({
+          text: line,
+          margin: [0, 1, 0, 1],
+          color: '#333333',
+          fontSize: 10
+        });
+      }
+    }
+  }
+  
+  return formattedLines;
+}
+
+/** Simple text formatter - handles basic structure without complex detection */
+function formatSimpleText(text) {
+  if (!text) return [{ text: 'No content available', color: '#888888', italics: true }];
+  
+  const lines = text.split('\n');
+  const formattedLines = [];
+  
+  for (let line of lines) {
+    line = line.trim();
+    if (!line) {
+      // Add small spacing for empty lines
+      formattedLines.push({ text: '', margin: [0, 3, 0, 0] });
+      continue;
+    }
+    
+    // Headers (lines starting with #)
+    if (line.startsWith('#')) {
+      const headerText = line.replace(/^#+\s*/, '');
+      formattedLines.push({
+        text: headerText,
+        bold: true,
+        fontSize: 12,
+        color: '#42145F',
+        margin: [0, 6, 0, 3]
+      });
+    }
+    // Lines that are ALL CAPS and look like section headers
+    else if (line === line.toUpperCase() && line.length > 3 && line.length < 80 && !/\d/.test(line)) {
+      formattedLines.push({
+        text: line,
+        bold: true,
+        fontSize: 11,
+        color: '#5A287D',
+        margin: [0, 5, 0, 2]
+      });
+    }
+    // Bullet points - convert to proper bullets
+    else if (line.match(/^[-•*]\s+/)) {
+      const bulletText = line.replace(/^[-•*]\s+/, '');
+      formattedLines.push({
+        text: '• ' + bulletText,
+        margin: [15, 1, 0, 1],
+        color: '#333333'
+      });
+    }
+    // Simple key-value detection (avoid complex parsing)
+    else if (line.includes(':') && line.split(':').length === 2) {
+      const parts = line.split(':');
+      const key = parts[0].trim();
+      const value = parts[1].trim();
+      
+      // Only treat as key-value if key is reasonably short and value exists
+      if (key.length > 0 && key.length < 50 && value.length > 0) {
+        formattedLines.push({
+          text: [
+            { text: key + ': ', bold: true, color: '#42145F' },
+            { text: value, color: '#333333' }
+          ],
+          margin: [0, 1, 0, 1]
+        });
+      } else {
+        // Treat as regular text
+        formattedLines.push({
+          text: line,
+          margin: [0, 1, 0, 1],
+          color: '#333333'
+        });
+      }
+    }
+    // Regular text lines
+    else {
+      formattedLines.push({
+        text: line,
+        margin: [0, 1, 0, 1],
+        color: '#333333'
+      });
+    }
+  }
+  
+  return formattedLines;
+}
+
+/**
+ * Tries to parse text as key-value pairs.
+ * Returns array of {key, value} if >= threshold ratio of lines match, else null.
+ */
+function tryParseKeyValueText(text, threshold = 0.7) {
+  if (!text) return null;
+  const lines = text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0);
+
+  const kvRegex = /^([\w\d_]+)\s+(.+)$/; // key value
+
+  const kvPairs = [];
+  let matchedLines = 0;
+
+  for (const line of lines) {
+    const match = line.match(kvRegex);
+    if (match) {
+      matchedLines++;
+      kvPairs.push({ key: match[1], value: match[2] });
+    } else {
+      // Non-matching lines are appended to last pair's value (continuation)
+      if (kvPairs.length) {
+        kvPairs[kvPairs.length - 1].value += ' ' + line;
+      } else {
+        // No valid pairs at start: treat as unstructured
+        return null;
+      }
+    }
+  }
+
+  if (lines.length === 0) return null;
+  if (matchedLines / lines.length >= threshold) {
+    return kvPairs;
+  }
+  return null;
+}
+
+/** Converts parsed key-value pairs to a pdfMake table */
+function keyValuePairsToPdfMakeTable(pairs) {
+  if (!pairs?.length) return [];
+
+  const body = [
+    [
+      { text: 'Key', style: 'tableHeader' },
+      { text: 'Value', style: 'tableHeader' },
+    ],
+    ...pairs.map(({ key, value }) => [
+      { text: insertZeroWidthSpaces(key), style: 'kvKey' },
+      { text: insertZeroWidthSpaces(value), style: 'kvValue' },
+    ]),
+  ];
+
+  return [
+    {
+      style: 'kvTable',
+      table: {
+        headerRows: 1,
+        widths: ['auto', '*'],
+        body,
+      },
+      layout: 'lightHorizontalLines',
+      margin: [0, 5, 0, 15],
+    },
+  ];
+}
+
+/** Converts markdown string to pdfMake content with zero-width space insertion */
+const markdownToPdfMakeContent = (markdown) => {
+  try {
+    const processedMarkdown = insertZeroWidthSpaces(markdown || '', 20);
+    const html = marked(processedMarkdown);
+    const pdfmakeContent = htmlToPdfmake(html, { window: window });
+    return Array.isArray(pdfmakeContent) ? pdfmakeContent : [pdfmakeContent];
+  } catch (error) {
+    console.error('Error converting markdown to pdfMake content:', error);
+    return [
+      { text: insertZeroWidthSpaces(markdown || '', 20), style: 'responseText' },
+    ];
+  }
+};
+
+/**
+ * Tries to parse the text as JSON and returns pretty-printed string.
+ * Returns null if not valid JSON.
+ */
+function tryParseAndPrettyPrintJSON(text) {
+  if (!text) return null;
+  try {
+    const obj = JSON.parse(text);
+    // Pretty print JSON with 2 spaces indentation
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Main text formatter - simple and reliable approach
+ * Priority: 1) Conversations, 2) JSON, 3) Basic text formatting
+ */
+function formatTextForPdf(text, options = {}) {
+  const { maxLength = null } = options;
+  
+  if (!text || text.trim() === '') {
+    return [{ text: 'No content available', italics: true, color: '#888888' }];
+  }
+
+  // Truncate long text with indicator
+  let processedText = text.trim();
+  let truncated = false;
+  if (maxLength && processedText.length > maxLength) {
+    processedText = processedText.substring(0, maxLength).trim();
+    truncated = true;
+  }
+
+  // 1. PRIORITY: Check for conversation format (Agent 00:02, Customer 00:10, etc.)
+  if (isConversationFormat(processedText)) {
+    const formatted = formatConversation(processedText);
+    if (truncated) {
+      formatted.push({ 
+        text: '... (content truncated)', 
+        italics: true, 
+        fontSize: 9, 
+        color: '#666666', 
+        margin: [0, 5, 0, 0] 
+      });
+    }
+    return formatted;
+  }
+
+  // 2. Check for JSON format
+  const jsonPretty = tryParseAndPrettyPrintJSON(processedText);
+  if (jsonPretty) {
+    const result = [{
+      text: insertZeroWidthSpaces(jsonPretty, 60),
+      fontSize: 9,
+      fontFamily: 'Courier',
+      background: '#f8f9fa',
+      margin: [0, 3, 0, 8],
+      color: '#333333',
+    }];
+    
+    if (truncated) {
+      result.push({ 
+        text: '... (JSON truncated)', 
+        italics: true, 
+        fontSize: 9, 
+        color: '#666666' 
+      });
+    }
+    return result;
+  }
+
+  // 3. Basic text formatting for everything else
+  const formatted = formatSimpleText(processedText);
+  if (truncated) {
+    formatted.push({ 
+      text: '... (content truncated)', 
+      italics: true, 
+      fontSize: 9, 
+      color: '#666666', 
+      margin: [0, 3, 0, 0] 
+    });
+  }
+  
+  return formatted;
+}
+
+/**
+ * Main function to generate pdfMake document definition from execution data.
+ */
+export function generatePDFDocument(execution) {
+  const content = [];
+
+  // Header
+  content.push({ text: 'Execution Report', style: 'header' });
+  content.push({ 
+    text: `Generated on ${formatDateTime(new Date().toISOString())}`, 
+    style: 'subtitle',
+    margin: [0, 0, 0, 20] 
+  });
+
+  // 1. BASIC EXECUTION INFO SECTION
+  content.push({ text: 'Execution Details', style: 'sectionHeader' });
+  
+  const execInfoBody = [
+    ['Field', 'Value'].map((txt) => ({ text: txt, style: 'tableHeader' })),
+    ['Execution ID', execution.execution_id || 'N/A'],
+    ['Status', execution.status || 'N/A'],
+    ['Executed By', execution.executed_by || 'N/A'],
+    ['Model', execution.model || 'N/A'],
+    ['Aidlet ID', execution.aidlet_id || 'N/A'],
+    ['Started At', formatDateTime(execution.started_at)],
+    ['Finished At', formatDateTime(execution.finished_at)],
+  ];
+
+  // Add execution config details
+  if (execution.execution_config) {
+    const config = execution.execution_config;
+    if (config.browser) execInfoBody.push(['Browser', config.browser]);
+    if (config.headless !== undefined) execInfoBody.push(['Headless Mode', config.headless ? 'Yes' : 'No']);
+    if (config.environment) execInfoBody.push(['Environment', config.environment]);
+    if (config.num_prompts) execInfoBody.push(['Number of Prompts', config.num_prompts.toString()]);
+    if (config.dataset_type) execInfoBody.push(['Dataset Type', config.dataset_type]);
+  }
+
+  content.push({
+    style: 'detailsTable',
+    table: {
+      widths: ['auto', '*'],
+      body: execInfoBody,
+    },
+    layout: 'lightHorizontalLines',
+    margin: [0, 0, 0, 25],
+  });
+
+  // 2. RESULTS SECTION
+  content.push({ text: 'Test Results', style: 'sectionHeader', margin: [0, 20, 0, 10] });
+
+  if (!execution.results || execution.results.length === 0) {
+    content.push({ 
+      text: 'No results available for this execution.', 
+      italics: true, 
+      style: 'noContent',
+      margin: [0, 0, 0, 15] 
+    });
+  } else {
+    execution.results.forEach((result, idx) => {
+      // Result header
+      content.push({ 
+        text: `Test Result ${idx + 1}`, 
+        style: 'resultHeader', 
+        margin: [0, 15, 0, 10] 
+      });
+
+      // Status
+      content.push({
+        text: [
+          { text: 'Status: ', style: 'fieldLabel' },
+          { text: result.status || 'N/A', style: result.status === 'PASS' ? 'statusPass' : 'statusFail' }
+        ],
+        margin: [0, 0, 0, 8]
+      });
+
+      // Final Reason
+      if (result.final_reason) {
+        content.push({ 
+          text: 'Reason:', 
+          style: 'fieldLabel', 
+          margin: [0, 8, 0, 4] 
+        });
+        content.push({ 
+          stack: formatTextForPdf(result.final_reason, { maxLength: 2000 }), 
+          margin: [0, 0, 0, 10]
+        });
+      }
+
+      // Prompt Text
+      if (result.prompt_text) {
+        content.push({ 
+          text: 'Prompt Text:', 
+          style: 'fieldLabel', 
+          margin: [0, 8, 0, 4] 
+        });
+        content.push({ 
+          stack: formatTextForPdf(result.prompt_text, { skipKeyValue: true, maxLength: 3000 }), 
+          margin: [0, 0, 0, 10]
+        });
+      }
+
+      // Ideal Response
+      if (result.ideal_response) {
+        content.push({ 
+          text: 'Expected Response:', 
+          style: 'fieldLabel', 
+          margin: [0, 8, 0, 4] 
+        });
+        content.push({ 
+          stack: formatTextForPdf(result.ideal_response, { maxLength: 2000 }), 
+          margin: [0, 0, 0, 10]
+        });
+      }
+
+      // Actual Response
+      if (result.actual_response) {
+        content.push({ 
+          text: 'Actual Response:', 
+          style: 'fieldLabel', 
+          margin: [0, 8, 0, 4] 
+        });
+        content.push({ 
+          stack: formatTextForPdf(result.actual_response, { maxLength: 2000 }), 
+          margin: [0, 0, 0, 10]
+        });
+      }
+
+      // Metrics Table
+      if (result.metrics && result.metrics.length > 0) {
+        content.push({ 
+          text: 'Test Metrics:', 
+          style: 'fieldLabel', 
+          margin: [0, 12, 0, 6] 
+        });
+
+        const metricTableBody = [
+          ['Metric', 'Score', 'Status', 'Reason'].map((header) => ({
+            text: header,
+            style: 'tableHeader',
+          })),
+          ...result.metrics.map((metric) => [
+            metric.name || 'Unknown',
+            `${(metric.score * 100).toFixed(1)}%`,
+            { 
+              text: metric.status || 'N/A', 
+              style: metric.status === 'PASS' ? 'statusPass' : 'statusFail' 
+            },
+            { 
+              text: insertZeroWidthSpaces(metric.reason || '', 30), 
+              fontSize: 9 
+            }
+          ]),
+        ];
+
+        content.push({
+          table: {
+            headerRows: 1,
+            widths: ['*', 'auto', 'auto', '*'],
+            body: metricTableBody,
+          },
+          layout: {
+            fillColor: (rowIndex) => (rowIndex % 2 === 0 ? '#f9f9f9' : null),
+            hLineWidth: () => 0.5,
+            vLineWidth: () => 0.5,
+            hLineColor: () => '#cccccc',
+            vLineColor: () => '#cccccc'
+          },
+          margin: [0, 0, 0, 15],
+        });
+      }
+
+      // Page break between results except the last
+      if (idx < execution.results.length - 1) {
+        content.push({ text: '', pageBreak: 'after' });
+      }
+    });
+  }
+
+  // 3. OVERALL EXECUTION METRICS SECTION
+  content.push({
+    text: 'Overall Execution Metrics',
+    style: 'sectionHeader',
+    margin: [0, 25, 0, 10],
+  });
+
+  if (execution.metrics && execution.metrics.length > 0) {
+    const overallMetricTableBody = [
+      ['Metric', 'Score', 'Status', 'Reason'].map((header) => ({
+        text: header,
+        style: 'tableHeader',
+      })),
+      ...execution.metrics.map((metric) => [
+        metric.name || 'Unknown Metric',
+        `${(metric.score * 100).toFixed(1)}%`,
+        { 
+          text: metric.status || 'N/A', 
+          style: metric.status === 'PASS' ? 'statusPass' : 'statusFail' 
+        },
+        { 
+          text: insertZeroWidthSpaces(metric.reason || '', 30), 
+          fontSize: 9 
+        }
+      ]),
+    ];
+
+    content.push({
+      table: {
+        headerRows: 1,
+        widths: ['*', 'auto', 'auto', '*'],
+        body: overallMetricTableBody,
+      },
+      layout: {
+        fillColor: (rowIndex) => (rowIndex % 2 === 0 ? '#f9f9f9' : null),
+        hLineWidth: () => 0.5,
+        vLineWidth: () => 0.5,
+        hLineColor: () => '#cccccc',
+        vLineColor: () => '#cccccc'
+      },
+      margin: [0, 0, 0, 20],
+    });
+  } else {
+    content.push({ 
+      text: 'No overall execution metrics available for this test run.', 
+      italics: true, 
+      style: 'noContent',
+      margin: [0, 0, 0, 20]
+    });
+  }
+
+  // Document definition with enhanced styles
+  const docDefinition = {
+    content,
+    styles: {
+      // Main headers
+      header: { fontSize: 24, bold: true, color: '#42145F', margin: [0, 0, 0, 5] },
+      subtitle: { fontSize: 12, color: '#666666', italics: true },
+      sectionHeader: { fontSize: 18, bold: true, color: '#5A287D', margin: [0, 15, 0, 8] },
+      resultHeader: { fontSize: 14, bold: true, color: '#5E10B1', margin: [0, 10, 0, 5] },
+      
+      // Field labels and content
+      fieldLabel: { fontSize: 12, bold: true, color: '#42145F', margin: [0, 0, 0, 2] },
+      responseText: { fontSize: 11, margin: [0, 0, 0, 5], color: '#333333', lineHeight: 1.4 },
+      noContent: { fontSize: 11, color: '#888888', italics: true },
+      
+      // Status indicators
+      statusPass: { color: '#16a085', bold: true },
+      statusFail: { color: '#e74c3c', bold: true },
+      
+      // Table styling
+      tableHeader: { bold: true, fillColor: '#5A287D', color: '#ffffff', margin: [4, 6, 4, 6] },
+      detailsTable: { margin: [0, 0, 0, 15], fontSize: 11, color: '#42145F' },
+      
+
+ 
+
+
+
+
+
+
+
 import React from 'react';
 import PDFDownloadButton from './PDFDownloadButton';
 
