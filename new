@@ -1,2090 +1,924 @@
-import React, { useState, useCallback, useMemo } from 'react';
-import { useSelector } from 'react-redux';
-import TextRenderer from './TextProcessor';
-import PDFGenerator from './PDFGenerator';
-import EnhancedComparisonResponses from './EnhancedComparisonResponses';
-import './EnhancedSplitView.css';
+import { marked } from 'marked';
+import htmlToPdfmake from 'html-to-pdfmake';
+
+/** Inserts zero-width spaces into long strings for wrapping */
+function insertZeroWidthSpaces(text, maxLength = 20) {
+  if (!text) return '';
+  const regex = new RegExp(`(.{${maxLength}})`, 'g');
+  return text.replace(regex, '$1\u200B');
+}
 
 /**
- * Enhanced Split View component with intelligent text processing and PDF generation
+ * Tries to parse text as key-value pairs.
+ * Returns array of {key, value} if >= threshold ratio of lines match, else null.
  */
-export default function EnhancedSplitView({ 
-  leftContent, 
-  rightContent, 
-  title = "Execution Results",
-  showPDFExport = true,
-  splitRatio = 50 // Percentage for left panel (50 = equal split)
-}) {
-  const [isResizing, setIsResizing] = useState(false);
-  const [currentSplitRatio, setCurrentSplitRatio] = useState(splitRatio);
-  const [isDragging, setIsDragging] = useState(false);
-  
-  // Get user and execution data from Redux store
-  const userData = useSelector(state => state.user || {});
-  const executionData = useSelector(state => state.execution || {});
+function tryParseKeyValueText(text, threshold = 0.7) {
+  if (!text) return null;
+  const lines = text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0);
 
-  // Handle mouse events for resizing
-  const handleMouseDown = useCallback((e) => {
-    e.preventDefault();
-    setIsResizing(true);
-    setIsDragging(true);
-  }, []);
+  const kvRegex = /^([\w\d_]+)\s+(.+)$/; // key value
 
-  const handleMouseMove = useCallback((e) => {
-    if (!isResizing) return;
-    
-    const container = e.currentTarget.closest('.split-view-container');
-    if (!container) return;
-    
-    const rect = container.getBoundingClientRect();
-    const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
-    
-    // Constrain between 20% and 80%
-    const constrainedRatio = Math.max(20, Math.min(80, newRatio));
-    setCurrentSplitRatio(constrainedRatio);
-  }, [isResizing]);
+  const kvPairs = [];
+  let matchedLines = 0;
 
-  const handleMouseUp = useCallback(() => {
-    setIsResizing(false);
-    setIsDragging(false);
-  }, []);
-
-  // Add global mouse event listeners
-  React.useEffect(() => {
-    if (isResizing) {
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
-      
-      return () => {
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      };
-    }
-  }, [isResizing, handleMouseMove, handleMouseUp]);
-
-  // Generate PDF data
-  const pdfData = useMemo(() => ({
-    title: title,
-    user: userData,
-    execution: executionData,
-    leftContent: leftContent,
-    rightContent: rightContent,
-    timestamp: new Date().toISOString()
-  }), [title, userData, executionData, leftContent, rightContent]);
-
-  // Handle PDF export
-  const handlePDFExport = useCallback(() => {
-    const pdfGenerator = new PDFGenerator();
-    pdfGenerator.generatePDFDocument(pdfData);
-  }, [pdfData]);
-
-  // Reset split to equal
-  const resetSplit = useCallback(() => {
-    setCurrentSplitRatio(50);
-  }, []);
-
-  // Render content with TextRenderer
-  const renderContent = useCallback((content) => {
-    if (React.isValidElement(content)) {
-      return content;
-    }
-    
-    if (typeof content === 'string') {
-      return <TextRenderer rawText={content} className="split-view-text" />;
-    }
-    
-    if (content && typeof content === 'object') {
-      // Handle comparison responses
-      if (content.actualResponse !== undefined || content.idealResponse !== undefined) {
-        return (
-          <EnhancedComparisonResponses
-            actualResponse={content.actualResponse}
-            idealResponse={content.idealResponse}
-          />
-        );
+  for (const line of lines) {
+    const match = line.match(kvRegex);
+    if (match) {
+      matchedLines++;
+      kvPairs.push({ key: match[1], value: match[2] });
+    } else {
+      // Non-matching lines are appended to last pair's value (continuation)
+      if (kvPairs.length) {
+        kvPairs[kvPairs.length - 1].value += ' ' + line;
+      } else {
+        // No valid pairs at start: treat as unstructured
+        return null;
       }
-      
-      // Handle other object content
-      return (
-        <div className="split-view-object">
-          <pre>{JSON.stringify(content, null, 2)}</pre>
-        </div>
-      );
     }
-    
-    return (
-      <div className="split-view-empty">
-        <div className="empty-content">
-          No content available
-        </div>
-      </div>
-    );
-  }, []);
-
-  return (
-    <div className="enhanced-split-view">
-      {/* Header */}
-      <div className="split-view-header">
-        <h3 className="split-view-title">{title}</h3>
-        <div className="split-view-controls">
-          <button 
-            className="control-btn reset-btn"
-            onClick={resetSplit}
-            title="Reset to equal split"
-          >
-            ⚌
-          </button>
-          {showPDFExport && (
-            <button 
-              className="control-btn pdf-btn"
-              onClick={handlePDFExport}
-              title="Export to PDF"
-            >
-              📄
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Split View Container */}
-      <div 
-        className={`split-view-container ${isDragging ? 'dragging' : ''}`}
-        onMouseMove={handleMouseMove}
-      >
-        {/* Left Panel */}
-        <div 
-          className="split-panel left-panel"
-          style={{ width: `${currentSplitRatio}%` }}
-        >
-          <div className="panel-content">
-            {renderContent(leftContent)}
-          </div>
-        </div>
-
-        {/* Resizer */}
-        <div 
-          className={`split-resizer ${isResizing ? 'active' : ''}`}
-          onMouseDown={handleMouseDown}
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize panels"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === 'ArrowLeft') {
-              setCurrentSplitRatio(Math.max(20, currentSplitRatio - 5));
-            } else if (e.key === 'ArrowRight') {
-              setCurrentSplitRatio(Math.min(80, currentSplitRatio + 5));
-            } else if (e.key === 'Enter' || e.key === ' ') {
-              resetSplit();
-            }
-          }}
-        >
-          <div className="resizer-handle">
-            <div className="resizer-dots">
-              <span></span>
-              <span></span>
-              <span></span>
-            </div>
-          </div>
-        </div>
-
-        {/* Right Panel */}
-        <div 
-          className="split-panel right-panel"
-          style={{ width: `${100 - currentSplitRatio}%` }}
-        >
-          <div className="panel-content">
-            {renderContent(rightContent)}
-          </div>
-        </div>
-      </div>
-
-      {/* Status Bar */}
-      <div className="split-view-status">
-        <span className="status-info">
-          Split: {Math.round(currentSplitRatio)}% / {Math.round(100 - currentSplitRatio)}%
-        </span>
-        {showPDFExport && (
-          <span className="status-info">
-            Ready for PDF export
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* Enhanced Comparison Responses Styling */
-.comparison-responses {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-  background-color: #ffffff;
-  border-radius: 12px;
-  box-shadow: 0 4px 12px rgba(90, 40, 125, 0.1);
-  overflow: hidden;
-}
-
-.responses-container {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  height: 100%;
-  gap: 0;
-  border: 1px solid #e0d4e7;
-}
-
-/* Response Column Styling */
-.response-column {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  background-color: #ffffff;
-  border-right: 1px solid #e0d4e7;
-}
-
-.response-column:last-child {
-  border-right: none;
-}
-
-.response-column-header {
-  margin: 0;
-  padding: 16px 20px;
-  background: linear-gradient(135deg, #5A287D 0%, #7B3FA0 100%);
-  color: white;
-  font-size: 14px;
-  font-weight: 600;
-  text-align: center;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  border-bottom: 1px solid #e0d4e7;
-  box-shadow: 0 2px 4px rgba(90, 40, 125, 0.1);
-}
-
-.response-column-content {
-  flex: 1;
-  padding: 20px;
-  overflow-y: auto;
-  position: relative;
-  transition: all 0.3s ease;
-}
-
-.response-column-content.expandable {
-  cursor: pointer;
-}
-
-.response-column-content.expandable:hover {
-  background-color: #faf9fb;
-}
-
-.response-column-content.expandable:focus {
-  outline: 2px solid #5A287D;
-  outline-offset: -2px;
-}
-
-/* Response Text Styling */
-.response-text {
-  line-height: 1.6;
-  color: #2c3e50;
-  font-size: 14px;
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-}
-
-/* Empty State */
-.response-column-content.empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 200px;
-}
-
-.no-content {
-  color: #8e8e93;
-  font-style: italic;
-  font-size: 14px;
-  text-align: center;
-  padding: 20px;
-  background-color: #f8f9fa;
-  border-radius: 8px;
-  border: 2px dashed #d1d5db;
-}
-
-/* Expand Toggle Button */
-.expand-indicator {
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid #e9ecef;
-  text-align: center;
-}
-
-.expand-toggle-btn {
-  background: linear-gradient(135deg, #5A287D 0%, #7B3FA0 100%);
-  color: white;
-  border: none;
-  padding: 8px 16px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.expand-toggle-btn:hover {
-  background: linear-gradient(135deg, #4A1F6B 0%, #6B3590 100%);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 8px rgba(90, 40, 125, 0.2);
-}
-
-.expand-toggle-btn:active {
-  transform: translateY(0);
-  box-shadow: 0 2px 4px rgba(90, 40, 125, 0.2);
-}
-
-.expand-toggle-btn:focus {
-  outline: 2px solid #5A287D;
-  outline-offset: 2px;
-}
-
-/* Responsive Design */
-@media (max-width: 768px) {
-  .responses-container {
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr 1fr;
   }
-  
-  .response-column {
-    border-right: none;
-    border-bottom: 1px solid #e0d4e7;
+
+  if (lines.length === 0) return null;
+  if (matchedLines / lines.length >= threshold) {
+    return kvPairs;
   }
-  
-  .response-column:last-child {
-    border-bottom: none;
-  }
-  
-  .response-column-header {
-    font-size: 13px;
-    padding: 12px 16px;
-  }
-  
-  .response-column-content {
-    padding: 16px;
-  }
+  return null;
 }
 
-@media (max-width: 480px) {
-  .response-column-header {
-    font-size: 12px;
-    padding: 10px 12px;
-  }
-  
-  .response-column-content {
-    padding: 12px;
-  }
-  
-  .response-text {
-    font-size: 13px;
-  }
+/** Converts parsed key-value pairs to a pdfMake table */
+function keyValuePairsToPdfMakeTable(pairs) {
+  if (!pairs?.length) return [];
+
+  const body = [
+    [
+      { text: 'Key', style: 'tableHeader' },
+      { text: 'Value', style: 'tableHeader' },
+    ],
+    ...pairs.map(({ key, value }) => [
+      { text: insertZeroWidthSpaces(key), style: 'kvKey' },
+      { text: insertZeroWidthSpaces(value), style: 'kvValue' },
+    ]),
+  ];
+
+  return [
+    {
+      style: 'kvTable',
+      table: {
+        headerRows: 1,
+        widths: ['auto', '*'],
+        body,
+      },
+      layout: 'lightHorizontalLines',
+      margin: [0, 5, 0, 15],
+    },
+  ];
 }
 
-/* Accessibility Improvements */
-@media (prefers-reduced-motion: reduce) {
-  .response-column-content,
-  .expand-toggle-btn {
-    transition: none;
-  }
-}
-
-/* High Contrast Mode */
-@media (prefers-contrast: high) {
-  .response-column-header {
-    background: #000000;
-    color: #ffffff;
-  }
-  
-  .expand-toggle-btn {
-    background: #000000;
-    border: 2px solid #ffffff;
-  }
-  
-  .response-column-content.expandable:focus {
-    outline: 3px solid #000000;
-  }
-}
-
-/* Print Styles */
-@media print {
-  .comparison-responses {
-    box-shadow: none;
-    border: 1px solid #000000;
-  }
-  
-  .response-column-header {
-    background: #000000 !important;
-    color: #ffffff !important;
-    -webkit-print-color-adjust: exact;
-    color-adjust: exact;
-  }
-  
-  .expand-toggle-btn {
-    display: none;
-  }
-  
-  .response-column-content {
-    max-height: none !important;
-    overflow: visible !important;
-  }
-}
-
-import React, { useState, useCallback } from 'react';
-import TextRenderer from './TextProcessor';
-import './EnhancedComparisonResponses.css';
-
-const MAX_CHAR_LIMIT = 600; // Increased for better readability
-
-/**
- * Enhanced ComparisonResponses component with intelligent text processing
- */
-export default function EnhancedComparisonResponses({ actualResponse, idealResponse }) {
-  const [expanded, setExpanded] = useState({
-    actual: false,
-    ideal: false,
-  });
-
-  const toggleExpand = useCallback((key) => {
-    setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
-  }, []);
-
-  // Convert input to safe string
-  const toSafeString = (input) => (typeof input === 'string' ? input : '');
-
-  // Check if content is long enough to need expansion
-  const isLongContent = (text) => text.length > MAX_CHAR_LIMIT;
-
-  // Render one response column with expand/collapse functionality
-  const renderResponseColumn = (textInput, key, title) => {
-    const text = toSafeString(textInput);
-    const isLong = isLongContent(text);
-    const isExpanded = expanded[key];
-
-    if (!text.trim()) {
-      return (
-        <div className="response-column">
-          <h5 className="response-column-header">{title}</h5>
-          <div className="response-column-content empty">
-            <div className="no-content">
-              No {title.toLowerCase()} available
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div className="response-column">
-        <h5 className="response-column-header">{title}</h5>
-        <div 
-          className={`response-column-content ${isLong ? 'expandable' : ''}`}
-          onClick={() => isLong && toggleExpand(key)}
-          style={{ cursor: isLong ? 'pointer' : 'default' }}
-          title={isLong ? (isExpanded ? 'Click to collapse' : 'Click to expand') : ''}
-          tabIndex={isLong ? 0 : undefined}
-          onKeyDown={(e) => {
-            if ((e.key === 'Enter' || e.key === ' ') && isLong) {
-              e.preventDefault();
-              toggleExpand(key);
-            }
-          }}
-          role={isLong ? 'button' : undefined}
-          aria-expanded={isExpanded}
-          aria-label={`${title} content`}
-        >
-          <TextRenderer 
-            rawText={isExpanded || !isLong ? text : text} 
-            maxLength={isExpanded || !isLong ? null : MAX_CHAR_LIMIT}
-            className="response-text"
-          />
-          
-          {isLong && (
-            <div className="expand-indicator">
-              <button 
-                className="expand-toggle-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  toggleExpand(key);
-                }}
-              >
-                {isExpanded ? 'Show Less' : 'Show More'}
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  return (
-    <div className="comparison-responses">
-      <div className="responses-container">
-        {renderResponseColumn(actualResponse, 'actual', 'Actual Response')}
-        {renderResponseColumn(idealResponse, 'ideal', 'Expected Response')}
-      </div>
-    </div>
-  );
-}
-
-import pdfMake from 'pdfmake/build/pdfmake';
-import pdfFonts from 'pdfmake/build/vfs_fonts';
-import { processText } from './TextProcessor';
-
-// Initialize pdfMake fonts
-if (pdfFonts && pdfFonts.pdfMake && pdfFonts.pdfMake.vfs) {
-  pdfMake.vfs = pdfFonts.pdfMake.vfs;
-}
-
-// PDF Styles with purple branding
-const pdfStyles = {
-  title: {
-    fontSize: 20,
-    bold: true,
-    color: '#5A287D',
-    margin: [0, 0, 0, 20],
-    alignment: 'center'
-  },
-  sectionHeader: {
-    fontSize: 16,
-    bold: true,
-    color: '#5A287D',
-    margin: [0, 20, 0, 10],
-    decoration: 'underline'
-  },
-  subHeader: {
-    fontSize: 14,
-    bold: true,
-    color: '#5A287D',
-    margin: [0, 15, 0, 8]
-  },
-  label: {
-    fontSize: 11,
-    bold: true,
-    margin: [0, 8, 0, 3],
-    color: '#5A287D'
-  },
-  normal: {
-    fontSize: 10,
-    margin: [0, 0, 0, 6],
-    lineHeight: 1.4,
-    alignment: 'justify'
-  },
-  small: {
-    fontSize: 9,
-    margin: [0, 0, 0, 4],
-    lineHeight: 1.3,
-    color: '#666'
-  },
-  conversation: {
-    fontSize: 9,
-    font: 'Courier',
-    margin: [0, 4, 0, 4],
-    lineHeight: 1.2
-  },
-  tableHeader: {
-    fontSize: 10,
-    bold: true,
-    fillColor: '#5A287D',
-    color: 'white',
-    margin: [4, 6, 4, 6],
-    alignment: 'left'
-  },
-  tableCell: {
-    fontSize: 9,
-    margin: [4, 6, 4, 6],
-    alignment: 'left'
-  },
-  footer: {
-    fontSize: 8,
-    color: '#666',
-    alignment: 'center',
-    margin: [0, 10, 0, 0]
+/** Converts markdown string to pdfMake content with zero-width space insertion */
+const markdownToPdfMakeContent = (markdown) => {
+  try {
+    const processedMarkdown = insertZeroWidthSpaces(markdown || '', 20);
+    const html = marked(processedMarkdown);
+    const pdfmakeContent = htmlToPdfmake(html, { window: window });
+    return Array.isArray(pdfmakeContent) ? pdfmakeContent : [pdfmakeContent];
+  } catch (error) {
+    console.error('Error converting markdown to pdfMake content:', error);
+    return [
+      { text: insertZeroWidthSpaces(markdown || '', 20), style: 'responseText' },
+    ];
   }
 };
 
-// Convert processed text blocks to PDF content
-function convertTextBlocksToPDF(rawText, maxWidth = 500) {
-  if (!rawText) return [{ text: 'No content available', style: 'small', color: '#999' }];
-  
-  const blocks = processText(rawText);
-  const content = [];
-  
-  blocks.forEach((block, blockIndex) => {
-    switch (block.type) {
-      case 'conversation':
-        content.push({ text: 'Conversation Transcript:', style: 'label' });
-        
-        // Group conversation lines to avoid orphaned lines
-        const conversationContent = [];
-        block.lines.forEach((line, index) => {
-          const lineText = `${line.speaker}${line.time ? ` [${line.time}]` : ''}: ${line.text}`;
-          
-          conversationContent.push({
-            text: lineText,
-            style: 'conversation',
-            margin: [10, 2, 0, 2]
-          });
-          
-          // Add small gap every 5 lines for readability
-          if ((index + 1) % 5 === 0 && index < block.lines.length - 1) {
-            conversationContent.push({ text: '', margin: [0, 3, 0, 3] });
-          }
-        });
-        
-        content.push({
-          stack: conversationContent,
-          margin: [0, 5, 0, 15],
-          background: '#f9f9f9',
-          border: [true, true, true, true],
-          borderColor: '#ddd'
-        });
-        break;
-        
-      case 'section':
-        content.push({
-          text: block.title,
-          style: 'subHeader',
-          pageBreak: blockIndex > 0 ? 'before' : undefined
-        });
-        
-        // Process section content recursively
-        block.content.forEach(item => {
-          const sectionContent = convertTextBlocksToPDF('', maxWidth);
-          // Process each content item based on its type
-          switch (item.type) {
-            case 'paragraph':
-              content.push({ text: item.text, style: 'normal' });
-              break;
-            case 'list':
-              const listContent = item.items.map(listItem => ({ text: listItem, style: 'normal' }));
-              if (item.ordered) {
-                content.push({ ol: listContent, margin: [0, 5, 0, 10] });
-              } else {
-                content.push({ ul: listContent, margin: [0, 5, 0, 10] });
-              }
-              break;
-            default:
-              content.push({ text: item.text || '', style: 'normal' });
-          }
-        });
-        break;
-        
-      case 'heading':
-        const headingStyle = block.level <= 2 ? 'subHeader' : 'label';
-        content.push({
-          text: block.text,
-          style: headingStyle,
-          pageBreak: blockIndex > 0 && block.level <= 2 ? 'before' : undefined
-        });
-        break;
-        
-      case 'paragraph':
-        // Handle very long paragraphs by splitting them
-        if (block.text.length > 1200) {
-          const sentences = block.text.split(/(?<=[.!?])\s+/);
-          let currentParagraph = '';
-          
-          sentences.forEach(sentence => {
-            if (currentParagraph.length + sentence.length > 800) {
-              if (currentParagraph) {
-                content.push({ text: currentParagraph.trim(), style: 'normal' });
-                currentParagraph = sentence;
-              }
-            } else {
-              currentParagraph += (currentParagraph ? ' ' : '') + sentence;
-            }
-          });
-          
-          if (currentParagraph) {
-            content.push({ text: currentParagraph.trim(), style: 'normal' });
-          }
-        } else {
-          content.push({ text: block.text, style: 'normal' });
-        }
-        break;
-        
-      case 'list':
-        const listItems = block.items.map(item => ({ text: item, style: 'normal' }));
-        if (block.ordered) {
-          content.push({ ol: listItems, margin: [0, 5, 0, 10] });
-        } else {
-          content.push({ ul: listItems, margin: [0, 5, 0, 10] });
-        }
-        break;
-        
-      case 'table':
-        if (block.headers && block.rows) {
-          const tableBody = [
-            block.headers.map(header => ({ text: header, style: 'tableHeader' }))
-          ];
-          
-          block.rows.forEach(row => {
-            tableBody.push(
-              row.map(cell => ({
-                text: cell.length > 150 ? cell.substring(0, 150) + '...' : cell,
-                style: 'tableCell'
-              }))
-            );
-          });
-          
-          content.push({
-            table: {
-              headerRows: 1,
-              body: tableBody,
-              widths: Array(block.headers.length).fill('*')
-            },
-            layout: {
-              fillColor: function (rowIndex) {
-                return rowIndex === 0 ? '#5A287D' : (rowIndex % 2 === 0 ? '#f9f9f9' : null);
-              },
-              hLineColor: function () { return '#ddd'; },
-              vLineColor: function () { return '#ddd'; }
-            },
-            margin: [0, 10, 0, 15]
-          });
-        }
-        break;
-        
-      default:
-        break;
-    }
-  });
-  
-  return content.length > 0 ? content : [{ text: 'No content available', style: 'small', color: '#999' }];
-}
-
-// Format date for display
-function formatDate(dateString) {
-  if (!dateString) return 'N/A';
+/**
+ * Tries to parse the text as JSON and returns pretty-printed string.
+ * Returns null if not valid JSON.
+ */
+function tryParseAndPrettyPrintJSON(text) {
+  if (!text) return null;
   try {
-    return new Date(dateString).toLocaleString('en-GB', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    const obj = JSON.parse(text);
+    // Pretty print JSON with 2 spaces indentation
+    return JSON.stringify(obj, null, 2);
   } catch {
-    return dateString;
+    return null;
   }
 }
 
-// Create metrics table for PDF
-function createMetricsTable(metrics, title) {
-  if (!metrics || metrics.length === 0) {
-    return [];
+/**
+ * Unified formatter for text field:
+ * - Detects JSON → pretty print in monospace style
+ * - Uses key-value table if detected (unless skipKeyValue is true)
+ * - Otherwise renders markdown content
+ */
+function formatTextForPdf(text, options = {}) {
+  const { skipKeyValue = false } = options;
+
+  const jsonPretty = tryParseAndPrettyPrintJSON(text);
+  if (jsonPretty) {
+    // Render JSON with monospace font and code style
+    // Insert zero-width spaces to avoid overflow on long continuous strings
+    const wrappedJson = insertZeroWidthSpaces(jsonPretty, 20);
+    return [
+      {
+        text: wrappedJson,
+        style: 'codeBlock', // monospace style defined in pdfMake styles
+      },
+    ];
   }
-  
+
+  if (!skipKeyValue) {
+    const parsedPairs = tryParseKeyValueText(text);
+    if (parsedPairs) {
+      return keyValuePairsToPdfMakeTable(parsedPairs);
+    }
+  }
+
+  return markdownToPdfMakeContent(text);
+}
+
+/**
+ * Main function to generate pdfMake document definition from execution data.
+ */
+export function generatePDFDocument(execution) {
   const content = [];
-  
-  if (title) {
-    content.push({ text: title, style: 'subHeader' });
-  }
-  
-  const tableBody = [
-    [
-      { text: 'Metric Name', style: 'tableHeader' },
-      { text: 'Score', style: 'tableHeader' },
-      { text: 'Status', style: 'tableHeader' },
-      { text: 'Reason', style: 'tableHeader' }
-    ]
+
+  // Header
+  content.push({ text: 'Execution Details', style: 'header' });
+
+  // Execution Info Table
+  const execInfoBody = [
+    ['Field', 'Value'].map((txt) => ({ text: txt, style: 'tableHeader' })),
+    ['Execution ID', execution.execution_id],
+    ['Status', execution.status],
+    ['Executed By', execution.executed_by],
+    ['Model', execution.model],
+    ['Dataset ID', execution.dataset_id],
+    ['Aidlet ID', execution.aidlet_id],
+    ['Started At', execution.started_at],
+    ['Finished At', execution.finished_at || 'N/A'],
+    ['Created At', execution.created_at],
   ];
-  
-  metrics.forEach(metric => {
-    const reason = metric.reason || 'No reason provided';
-    const truncatedReason = reason.length > 300 ? reason.substring(0, 300) + '...' : reason;
-    
-    tableBody.push([
-      { text: metric.name || 'N/A', style: 'tableCell' },
-      { 
-        text: typeof metric.score === 'number' ? `${(metric.score * 100).toFixed(1)}%` : 'N/A', 
-        style: 'tableCell',
-        alignment: 'center'
-      },
-      { 
-        text: metric.status || 'N/A', 
-        style: 'tableCell',
-        alignment: 'center'
-      },
-      { text: truncatedReason, style: 'tableCell' }
-    ]);
-  });
-  
   content.push({
+    style: 'detailsTable',
     table: {
-      headerRows: 1,
-      body: tableBody,
-      widths: ['25%', '10%', '10%', '55%']
+      widths: ['auto', '*'],
+      body: execInfoBody,
     },
-    layout: {
-      fillColor: function (rowIndex) {
-        return rowIndex === 0 ? '#5A287D' : (rowIndex % 2 === 0 ? '#f9f9f9' : null);
-      },
-      hLineColor: function () { return '#ddd'; },
-      vLineColor: function () { return '#ddd'; }
-    },
-    margin: [0, 10, 0, 20]
+    layout: 'lightHorizontalLines',
+    margin: [0, 0, 0, 15],
   });
-  
-  return content;
-}
 
-// Main PDF generation function
-export function generatePDFDocument(execution, logoBase64 = null) {
-  if (!execution) {
-    return {
-      content: [{ text: 'No execution data available', style: 'title' }],
-      styles: pdfStyles
-    };
+  // Results Section
+  content.push({ text: 'Results', style: 'header' });
+
+  if (!execution.results || execution.results.length === 0) {
+    content.push({ text: 'No results available.', italics: true, margin: [0, 0, 0, 15] });
+  } else {
+    execution.results.forEach((result, idx) => {
+      content.push({ text: `Result ${idx + 1}`, style: 'subheader', margin: [0, 10, 0, 5] });
+
+      // Prompt (always render as markdown/JSON, skip key-value table)
+      content.push({
+        columns: [
+          { width: 'auto', text: 'Prompt:', bold: true },
+          {
+            width: '*',
+            stack: formatTextForPdf(result.prompt_text || 'N/A', { skipKeyValue: true }),
+            style: 'responseText',
+            margin: [0, 5, 0, 5],
+          },
+        ],
+      });
+
+      // Status
+      content.push({
+        columns: [
+          { width: 'auto', text: 'Status:', bold: true },
+          { width: '*', text: result.status || 'N/A' },
+        ],
+        margin: [0, 2, 0, 2],
+      });
+
+      // Final Reason
+      content.push({ text: 'Final Reason', style: 'smallHeader', margin: [0, 8, 0, 4] });
+      content.push({ stack: formatTextForPdf(result.final_reason), style: 'responseText' });
+
+      // Actual Response
+      content.push({ text: 'Actual Response', style: 'smallHeader', margin: [0, 8, 0, 4] });
+      content.push({ stack: formatTextForPdf(result.actual_response), style: 'responseText' });
+
+      // Ideal Response (allow key-value table if detected)
+      content.push({ text: 'Ideal Response', style: 'smallHeader', margin: [0, 8, 0, 4] });
+      content.push({ stack: formatTextForPdf(result.ideal_response), style: 'responseText' });
+
+      // Metrics Table
+      content.push({ text: 'Metrics', style: 'smallHeader', margin: [0, 8, 0, 4] });
+
+      if (result.metrics && result.metrics.length > 0) {
+        const metricTableBody = [
+          ['Metric', 'Score', 'Status', 'Reason'].map((header) => ({
+            text: header,
+            style: 'tableHeader',
+          })),
+          ...result.metrics.map((metric) => [
+            execution.metricsLabels?.[metric.name] || metric.name,
+            `${(metric.score * 100).toFixed(0)}%`,
+            metric.status,
+            metric.reason || '',
+          ]),
+        ];
+
+        content.push({
+          style: 'metricsTable',
+          table: {
+            headerRows: 1,
+            widths: ['*', 'auto', 'auto', '*'],
+            body: metricTableBody,
+          },
+          layout: {
+            fillColor: (rowIndex) => (rowIndex % 2 === 0 ? '#f9f9f9' : null),
+          },
+          margin: [0, 0, 0, 10],
+        });
+      } else {
+        content.push({
+          text: 'No metrics available for this result.',
+          italics: true,
+          margin: [0, 0, 0, 10],
+        });
+      }
+
+      // Page break between results except the last
+      if (idx !== execution.results.length - 1) {
+        content.push({ text: '', pageBreak: 'after' });
+      }
+    });
   }
-  
-  const content = [];
-  
-  // Header with logo and title
-  if (logoBase64) {
+
+  // Overall Metrics
+  content.push({
+    text: 'Overall Execution Metrics',
+    style: 'header',
+    margin: [0, 10, 0, 5],
+  });
+
+  if (execution.metrics && execution.metrics.length > 0) {
+    const overallMetricTableBody = [
+      ['Metric', 'Score', 'Status', 'Reason'].map((header) => ({
+        text: header,
+        style: 'tableHeader',
+      })),
+      ...execution.metrics.map((metric) => [
+        execution.metricsLabels?.[metric.name] || metric.name,
+        `${(metric.score * 100).toFixed(0)}%`,
+        metric.status,
+        metric.reason || '',
+      ]),
+    ];
+
     content.push({
-      columns: [
-        { text: 'Execution Test Report', style: 'title', width: '*' },
-        { image: logoBase64, width: 60, height: 60, alignment: 'right' }
-      ],
-      margin: [0, 0, 0, 30]
+      style: 'metricsTable',
+      table: {
+        headerRows: 1,
+        widths: ['*', 'auto', 'auto', '*'],
+        body: overallMetricTableBody,
+      },
+      layout: {
+        fillColor: (rowIndex) => (rowIndex % 2 === 0 ? '#f9f9f9' : null),
+      },
+      margin: [0, 0, 0, 10],
     });
   } else {
-    content.push({ text: 'Execution Test Report', style: 'title' });
+    content.push({ text: 'No overall metrics available.', italics: true });
   }
-  
-  // Basic Execution Information Section
-  content.push({ text: 'Execution Information', style: 'sectionHeader' });
-  
-  const executionInfo = [
-    ['Execution ID', execution.execution_id || 'N/A'],
-    ['Status', execution.status || 'N/A'],
-    ['Executed By', execution.executed_by || 'N/A'],
-    ['Model', execution.model || 'N/A'],
-    ['Started At', formatDate(execution.started_at)],
-    ['Finished At', formatDate(execution.finished_at)],
-    ['Aidlet ID', execution.aidlet_id || 'N/A'],
-    ['Dataset Type', execution.execution_config?.dataset_type || 'N/A']
-  ];
-  
-  // Create execution info table
-  const executionTableBody = [
-    [
-      { text: 'Property', style: 'tableHeader' },
-      { text: 'Value', style: 'tableHeader' }
-    ]
-  ];
-  
-  executionInfo.forEach(([property, value]) => {
-    executionTableBody.push([
-      { text: property, style: 'tableCell', bold: true },
-      { text: value, style: 'tableCell' }
-    ]);
-  });
-  
-  content.push({
-    table: {
-      headerRows: 1,
-      body: executionTableBody,
-      widths: ['30%', '70%']
-    },
-    layout: {
-      fillColor: function (rowIndex) {
-        return rowIndex === 0 ? '#5A287D' : (rowIndex % 2 === 0 ? '#f9f9f9' : null);
-      },
-      hLineColor: function () { return '#ddd'; },
-      vLineColor: function () { return '#ddd'; }
-    },
-    margin: [0, 0, 0, 20]
-  });
-  
-  // Results Section
-  if (execution.results && execution.results.length > 0) {
-    content.push({ 
-      text: 'Test Results', 
-      style: 'sectionHeader',
-      pageBreak: 'before'
-    });
-    
-    execution.results.forEach((result, index) => {
-      // Result header
-      content.push({
-        text: `Result ${index + 1} - Status: ${result.status || 'N/A'}`,
-        style: 'subHeader',
-        pageBreak: index > 0 ? 'before' : undefined
-      });
-      
-      // Result reason
-      if (result.final_reason) {
-        content.push({ text: 'Final Reason:', style: 'label' });
-        content.push(...convertTextBlocksToPDF(result.final_reason));
-      }
-      
-      // Prompt text
-      if (result.prompt_text) {
-        content.push({ text: 'Prompt Text:', style: 'label' });
-        content.push(...convertTextBlocksToPDF(result.prompt_text));
-      }
-      
-      // Expected response
-      if (result.ideal_response) {
-        content.push({ text: 'Expected Response:', style: 'label' });
-        content.push(...convertTextBlocksToPDF(result.ideal_response));
-      }
-      
-      // Actual response
-      if (result.actual_response) {
-        content.push({ text: 'Actual Response:', style: 'label' });
-        content.push(...convertTextBlocksToPDF(result.actual_response));
-      }
-      
-      // Result metrics
-      if (result.metrics && result.metrics.length > 0) {
-        content.push(...createMetricsTable(result.metrics, 'Result Metrics'));
-      }
-      
-      // Add spacing between results
-      if (index < execution.results.length - 1) {
-        content.push({ text: '', margin: [0, 0, 0, 20] });
-      }
-    });
-  }
-  
-  // Overall Execution Metrics
-  if (execution.metrics && execution.metrics.length > 0) {
-    content.push({ 
-      text: 'Overall Execution Metrics', 
-      style: 'sectionHeader',
-      pageBreak: 'before'
-    });
-    content.push(...createMetricsTable(execution.metrics, null));
-  }
-  
-  // PDF document definition
+
+  // Document definition with styles
   const docDefinition = {
     content,
-    styles: pdfStyles,
-    pageSize: 'A4',
-    pageMargins: [40, 60, 40, 60],
-    footer: function(currentPage, pageCount) {
-      return {
-        text: `Generated by Aidlet Testing Framework | Execution ID: ${execution.execution_id || 'N/A'} | Page ${currentPage} of ${pageCount}`,
-        style: 'footer',
-        margin: [40, 20, 40, 0]
-      };
+    styles: {
+      header: { fontSize: 20, bold: true, color: '#42145F', margin: [0, 10, 0, 10] },          // zb-purple
+      subheader: { fontSize: 16, bold: true, margin: [0, 10, 0, 5], color: '#5A287D' },        // zb-world1
+      smallHeader: { fontSize: 14, bold: true, margin: [0, 8, 0, 3], color: '#5E10B1' },      // zb-bright-purple
+      tableHeader: { bold: true, fillColor: '#5A287D', color: '#fff', margin: [0, 5, 0, 5] },  // zb-world1 bg with white text
+      detailsTable: { margin: [0, 0, 0, 15], fontSize: 11, color: '#42145F' },                  // zb-purple text
+      metricsTable: { margin: [0, 5, 0, 15], fontSize: 11, color: '#42145F' },                  // zb-purple text
+      responseText: { fontSize: 11, margin: [0, 5, 0, 10], color: '#5E10B1' },                  // zb-bright-purple
+      paragraph: { margin: [0, 5, 0, 5], fontSize: 11, color: '#42145F' },                      // zb-purple
+      listItem: { fontSize: 11, margin: [0, 0, 0, 2], color: '#42145F' },                      // zb-purple
+      blockquote: {
+        margin: [10, 5, 0, 10],
+        italics: true,
+        color: '#5A287D',    // zb-world1
+        borderColor: '#A58CC3', // zb-world2 lighter border
+        borderLeft: 3,
+        paddingLeft: 10,
+      },
+      codeBlock: {
+        fontSize: 10,
+        fontFamily: 'monospace',
+        background: '#EBA5AA',  // zb-rose-light background for code, soft rose
+        margin: [0, 5, 0, 5],
+        padding: 5,
+        color: '#42145F', // zb-purple text
+        whiteSpace: 'pre-wrap', // preserve whitespace for JSON display
+      },
+      strong: { bold: true, color: '#5E10B1' }, // zb-bright-purple for strong text
+      em: { italics: true, color: '#5A287D' },  // zb-world1 purple for emphasis
+
+      // Key-value table styles
+      kvTable: { margin: [0, 5, 0, 15], fontSize: 11, color: '#42145F' },   // zb-purple
+      kvKey: { bold: true, color: '#42145F', margin: [0, 2, 0, 2] },        // zb-purple bold keys
+      kvValue: { margin: [0, 2, 0, 2], color: '#5E10B1' },                  // zb-bright-purple values
     },
     defaultStyle: {
-      font: 'Helvetica'
+      font: 'Roboto',
+      fontSize: 11,
+      lineHeight: 1.2,
+      color: '#42145F',  // zb-purple default text color
     },
-    info: {
-      title: `Execution Report - ${execution.execution_id}`,
-      author: 'Aidlet Testing Framework',
-      subject: `Test execution results for ${execution.execution_id}`,
-      creator: 'Aidlet Testing Framework'
-    }
+    pageMargins: [40, 60, 40, 60],
   };
-  
+
   return docDefinition;
 }
-
-// Generate and download PDF
-export function generateAndDownloadPDF(execution, logoBase64 = null, filename = null) {
-  try {
-    const docDefinition = generatePDFDocument(execution, logoBase64);
-    const finalFilename = filename || `execution_report_${execution.execution_id}_${new Date().getTime()}.pdf`;
-    
-    pdfMake.createPdf(docDefinition).download(finalFilename);
-    return true;
-  } catch (error) {
-    console.error('Error generating PDF:', error);
-    throw new Error('Failed to generate PDF report: ' + error.message);
-  }
+.results-page {
+  padding: 20px;
+  font-family: 'Segoe UI', sans-serif;
+  background-color: #f9f9f9;
 }
 
-
-/* Enhanced Text Processing Styles */
-.text-processor {
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  line-height: 1.6;
-  color: #333;
-}
-
-/* Conversation Transcript Styles */
-.conversation-transcript {
-  background: #f8f9fa;
-  border: 1px solid #e9ecef;
-  border-left: 4px solid #5A287D;
-  border-radius: 6px;
-  padding: 16px;
-  margin: 12px 0;
-  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-  font-size: 13px;
-  max-height: 400px;
-  overflow-y: auto;
-}
-
-.conversation-line {
-  margin-bottom: 8px;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.conversation-line .speaker {
-  font-weight: bold;
-  color: #5A287D;
-  min-width: 80px;
-  flex-shrink: 0;
-}
-
-.conversation-line .timestamp {
-  color: #6c757d;
-  font-size: 11px;
-  min-width: 50px;
-  flex-shrink: 0;
-}
-
-.conversation-line .message {
-  flex: 1;
-  word-wrap: break-word;
-}
-
-/* Assessment Section Styles */
-.assessment-section {
-  margin: 20px 0;
-  border: 1px solid #e9ecef;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.assessment-section .section-title {
-  background: #5A287D;
-  color: white;
-  margin: 0;
-  padding: 12px 16px;
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.assessment-section .section-content {
-  padding: 16px;
-}
-
-/* Heading Styles */
-.text-heading {
-  color: #5A287D;
-  font-weight: 600;
-  margin: 16px 0 8px 0;
-  border-bottom: 2px solid #5A287D;
-  padding-bottom: 4px;
-}
-
-.text-processor h1.text-heading { font-size: 1.8rem; }
-.text-processor h2.text-heading { font-size: 1.5rem; }
-.text-processor h3.text-heading { font-size: 1.3rem; }
-.text-processor h4.text-heading { font-size: 1.1rem; }
-.text-processor h5.text-heading { font-size: 1rem; }
-.text-processor h6.text-heading { font-size: 0.9rem; }
-
-/* Paragraph Styles */
-.text-paragraph {
-  margin: 8px 0;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-}
-
-/* List Styles */
-.text-list {
-  margin: 12px 0;
-  padding-left: 24px;
-}
-
-.text-list li {
-  margin: 4px 0;
-  line-height: 1.5;
-}
-
-/* Table Styles */
-.table-container {
-  margin: 16px 0;
-  overflow-x: auto;
-  border-radius: 6px;
-  border: 1px solid #e9ecef;
-}
-
-.text-table {
+.execution-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
-}
-
-.text-table th {
-  background: #5A287D;
-  color: white;
-  padding: 10px 12px;
-  text-align: left;
-  font-weight: 600;
-  border-bottom: 1px solid #dee2e6;
-}
-
-.text-table td {
-  padding: 8px 12px;
-  border-bottom: 1px solid #dee2e6;
-  vertical-align: top;
-}
-
-.text-table tr:nth-child(even) {
-  background: #f8f9fa;
-}
-
-/* Expandable Text Styles */
-.expandable-text-container {
-  position: relative;
-}
-
-.expandable-text-content {
-  transition: max-height 0.3s ease;
-  overflow: hidden;
-}
-
-.expandable-text-toggle {
-  background: none;
-  border: none;
-  color: #5A287D;
-  font-weight: 600;
-  cursor: pointer;
-  padding: 4px 0;
-  font-size: 14px;
-  margin-top: 8px;
-}
-
-.expandable-text-toggle:hover {
-  text-decoration: underline;
-}
-
-/* Responsive Design */
-@media (max-width: 768px) {
-  .conversation-transcript {
-    font-size: 12px;
-    padding: 12px;
-  }
-  
-  .conversation-line {
-    flex-direction: column;
-    gap: 4px;
-  }
-  
-  .conversation-line .speaker,
-  .conversation-line .timestamp {
-    min-width: auto;
-  }
-  
-  .text-table {
-    font-size: 12px;
-  }
-  
-  .text-table th,
-  .text-table td {
-    padding: 6px 8px;
-  }
-}
-
-/**
- * Universal Text Processor for handling various text formats
- * Handles conversation transcripts, structured reports, lists, and general text
- */
-
-// Detect conversation/transcript format
-function detectConversationFormat(text) {
-  if (!text || typeof text !== 'string') return null;
-  
-  const lines = text.split('\n').filter(line => line.trim());
-  const conversationPatterns = [
-    /^(Agent|Customer|Speaker|Operator|Rep|Client)\s*(\d{2}:\d{2}|\[\d{2}:\d{2}\])?/i,
-    /^(A|C|S|O|R):\s*/i, // Short format
-  ];
-  
-  let conversationLines = 0;
-  const parsedLines = [];
-  
-  for (const line of lines.slice(0, Math.min(10, lines.length))) {
-    for (const pattern of conversationPatterns) {
-      if (pattern.test(line.trim())) {
-        conversationLines++;
-        break;
-      }
-    }
-  }
-  
-  // If more than 40% of first lines are conversation format
-  if (conversationLines / Math.min(10, lines.length) > 0.4) {
-    return parseConversationTranscript(text);
-  }
-  
-  return null;
-}
-
-// Parse conversation transcript
-function parseConversationTranscript(text) {
-  const lines = text.split('\n').filter(line => line.trim());
-  const conversationLines = [];
-  
-  for (const line of lines) {
-    const trimmedLine = line.trim();
-    if (!trimmedLine) continue;
-    
-    // Enhanced patterns for different conversation formats
-    const patterns = [
-      // "Agent 00:02 text" or "Customer 00:10 text"
-      /^(Agent|Customer|Speaker|Operator|Rep|Client)\s*(\d{2}:\d{2}|\d+:\d+)?\s*(.+)$/i,
-      // "A: text" or "C: text"
-      /^([A-Z]):\s*(.+)$/,
-      // Special system messages
-      /^(Connection|System|Transfer|Queue).*$/i
-    ];
-    
-    let matched = false;
-    for (const pattern of patterns) {
-      const match = trimmedLine.match(pattern);
-      if (match) {
-        let speaker, time, text;
-        
-        if (pattern.source.includes('Agent|Customer')) {
-          speaker = match[1];
-          time = match[2] || '';
-          text = match[3] || '';
-        } else if (pattern.source.includes('[A-Z]')) {
-          speaker = match[1] === 'A' ? 'Agent' : match[1] === 'C' ? 'Customer' : match[1];
-          time = '';
-          text = match[2] || '';
-        } else {
-          speaker = 'System';
-          time = '';
-          text = trimmedLine;
-        }
-        
-        conversationLines.push({
-          speaker: speaker.trim(),
-          time: time.replace(/[\[\]]/g, '').trim(),
-          text: text.trim()
-        });
-        matched = true;
-        break;
-      }
-    }
-    
-    // If no pattern matched, add as continuation of previous line or new system message
-    if (!matched && conversationLines.length > 0) {
-      const lastLine = conversationLines[conversationLines.length - 1];
-      lastLine.text += ' ' + trimmedLine;
-    } else if (!matched) {
-      conversationLines.push({
-        speaker: 'System',
-        time: '',
-        text: trimmedLine
-      });
-    }
-  }
-  
-  return conversationLines.length > 2 ? conversationLines : null;
-}
-
-// Detect structured assessment format
-function detectStructuredAssessment(text) {
-  if (!text || typeof text !== 'string') return null;
-  
-  const structurePatterns = [
-    /^Section\s+(One|Two|Three|Four|[IVX]+):/im,
-    /^\d+[a-z]?:\s+/m,
-    /^[A-Z][^:]*:\s*Score:/im,
-    /^⭐{1,3}$/m,
-    /^\*{3,}/m,
-    /^#{1,6}\s+/m
-  ];
-  
-  for (const pattern of structurePatterns) {
-    if (pattern.test(text)) {
-      return parseStructuredAssessment(text);
-    }
-  }
-  
-  return null;
-}
-
-// Parse structured assessment
-function parseStructuredAssessment(text) {
-  const lines = text.split('\n');
-  const blocks = [];
-  let currentSection = null;
-  let currentParagraph = '';
-  
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    
-    if (!line) {
-      if (currentParagraph) {
-        if (currentSection) {
-          currentSection.content.push({ type: 'paragraph', text: currentParagraph.trim() });
-        } else {
-          blocks.push({ type: 'paragraph', text: currentParagraph.trim() });
-        }
-        currentParagraph = '';
-      }
-      continue;
-    }
-    
-    // Detect headings
-    if (line.match(/^(Section\s+(One|Two|Three|Four|[IVX]+)|#{1,6}|.*:\s*Score:|Overall|Summary|Commentary)/i) ||
-        line.match(/^\*{3,}.*\*{3,}$/)) {
-      
-      // Save current paragraph
-      if (currentParagraph) {
-        if (currentSection) {
-          currentSection.content.push({ type: 'paragraph', text: currentParagraph.trim() });
-        } else {
-          blocks.push({ type: 'paragraph', text: currentParagraph.trim() });
-        }
-        currentParagraph = '';
-      }
-      
-      // Save current section
-      if (currentSection) {
-        blocks.push(currentSection);
-      }
-      
-      // Start new section
-      currentSection = {
-        type: 'section',
-        title: line.replace(/^#+\s*/, '').replace(/\*+/g, ''),
-        content: []
-      };
-    }
-    // Detect list items
-    else if (line.match(/^\s*[-*•]\s+/) || line.match(/^\s*\d+[.)]\s+/)) {
-      if (currentParagraph) {
-        if (currentSection) {
-          currentSection.content.push({ type: 'paragraph', text: currentParagraph.trim() });
-        } else {
-          blocks.push({ type: 'paragraph', text: currentParagraph.trim() });
-        }
-        currentParagraph = '';
-      }
-      
-      const listItem = line.replace(/^\s*[-*•]\s+/, '').replace(/^\s*\d+[.)]\s+/, '');
-      const target = currentSection || blocks;
-      
-      // Check if last item is a list to continue it
-      const lastItem = currentSection ? 
-        currentSection.content[currentSection.content.length - 1] : 
-        blocks[blocks.length - 1];
-      
-      if (lastItem && lastItem.type === 'list') {
-        lastItem.items.push(listItem);
-      } else {
-        const newList = {
-          type: 'list',
-          items: [listItem],
-          ordered: /^\s*\d+[.)]\s+/.test(line)
-        };
-        
-        if (currentSection) {
-          currentSection.content.push(newList);
-        } else {
-          blocks.push(newList);
-        }
-      }
-    }
-    // Regular text
-    else {
-      currentParagraph += (currentParagraph ? ' ' : '') + line;
-    }
-  }
-  
-  // Save remaining content
-  if (currentParagraph) {
-    if (currentSection) {
-      currentSection.content.push({ type: 'paragraph', text: currentParagraph.trim() });
-    } else {
-      blocks.push({ type: 'paragraph', text: currentParagraph.trim() });
-    }
-  }
-  
-  if (currentSection) {
-    blocks.push(currentSection);
-  }
-  
-  return blocks.length > 0 ? blocks : null;
-}
-
-// Detect and parse tables
-function detectTable(text) {
-  if (!text || typeof text !== 'string') return null;
-  
-  const lines = text.split('\n').filter(line => line.trim());
-  const tableLines = lines.filter(line => 
-    line.includes('|') && 
-    line.split('|').length > 2 &&
-    !line.match(/^\s*\|*\s*[-\s]*\s*\|*\s*$/) // Skip separator lines
-  );
-  
-  if (tableLines.length < 2) return null;
-  
-  const headers = tableLines[0].split('|')
-    .map(h => h.trim())
-    .filter(h => h && !h.match(/^[-\s]*$/));
-    
-  const rows = [];
-  for (let i = 1; i < tableLines.length; i++) {
-    const row = tableLines[i].split('|')
-      .map(cell => cell.trim())
-      .filter(cell => cell && !cell.match(/^[-\s]*$/));
-    
-    if (row.length > 0) {
-      rows.push(row);
-    }
-  }
-  
-  return headers.length > 0 && rows.length > 0 ? { headers, rows } : null;
-}
-
-// Main text processing function
-export function processText(rawText) {
-  if (!rawText || typeof rawText !== 'string') {
-    return [{ type: 'paragraph', text: 'No content available' }];
-  }
-  
-  const text = rawText.trim();
-  
-  // Try conversation format first
-  const conversation = detectConversationFormat(text);
-  if (conversation) {
-    return [{ type: 'conversation', lines: conversation }];
-  }
-  
-  // Try structured assessment
-  const structuredContent = detectStructuredAssessment(text);
-  if (structuredContent) {
-    return structuredContent;
-  }
-  
-  // Try table format
-  const table = detectTable(text);
-  if (table) {
-    return [{ type: 'table', headers: table.headers, rows: table.rows }];
-  }
-  
-  // Fallback: process as paragraphs with basic formatting
-  return processPlainText(text);
-}
-
-// Process plain text with basic formatting
-function processPlainText(text) {
-  const blocks = [];
-  const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim());
-  
-  for (const paragraph of paragraphs) {
-    const trimmed = paragraph.trim();
-    
-    // Check for heading patterns
-    if (trimmed.split('\n').length === 1 && (
-      trimmed.match(/^[A-Z][^.!?]*:$/) ||
-      trimmed.match(/^#{1,6}\s+/) ||
-      trimmed.length < 100 && trimmed.match(/^[A-Z][A-Z\s]{2,}$/)
-    )) {
-      blocks.push({
-        type: 'heading',
-        text: trimmed.replace(/^#+\s*/, '').replace(/:$/, ''),
-        level: trimmed.match(/^#+/) ? trimmed.match(/^#+/)[0].length : 3
-      });
-      continue;
-    }
-    
-    // Check for list
-    const lines = trimmed.split('\n').map(l => l.trim()).filter(l => l);
-    if (lines.length > 1 && lines.every(line => 
-      line.match(/^\s*[-*•]\s+/) || line.match(/^\s*\d+[.)]\s+/)
-    )) {
-      const items = lines.map(line => 
-        line.replace(/^\s*[-*•]\s+/, '').replace(/^\s*\d+[.)]\s+/, '')
-      );
-      blocks.push({
-        type: 'list',
-        items,
-        ordered: lines[0].match(/^\s*\d+[.)]\s+/) !== null
-      });
-      continue;
-    }
-    
-    // Regular paragraph
-    blocks.push({
-      type: 'paragraph',
-      text: trimmed
-    });
-  }
-  
-  return blocks.length > 0 ? blocks : [{ type: 'paragraph', text: text }];
-}
-
-// React component for rendering processed text
-import React from 'react';
-
-export const TextRenderer = ({ rawText, className = '', maxLength = null }) => {
-  if (!rawText) {
-    return <div className={`text-muted ${className}`}>No content available</div>;
-  }
-  
-  const blocks = processText(rawText);
-  
-  return (
-    <div className={`text-processor ${className}`}>
-      {blocks.map((block, idx) => {
-        switch (block.type) {
-          case 'conversation':
-            return (
-              <div key={idx} className="conversation-transcript">
-                {block.lines.map((line, i) => (
-                  <div key={i} className="conversation-line">
-                    <span className="speaker">{line.speaker}</span>
-                    {line.time && (
-                      <span className="timestamp">[{line.time}]</span>
-                    )}
-                    <span className="message">{line.text}</span>
-                  </div>
-                ))}
-              </div>
-            );
-            
-          case 'section':
-            return (
-              <div key={idx} className="assessment-section">
-                <h4 className="section-title">{block.title}</h4>
-                <div className="section-content">
-                  {block.content.map((item, i) => (
-                    <TextRenderer key={i} rawText="" blocks={[item]} />
-                  ))}
-                </div>
-              </div>
-            );
-            
-          case 'heading':
-            const HeadingTag = `h${Math.min(block.level || 3, 6)}`;
-            return (
-              <HeadingTag key={idx} className="text-heading">
-                {block.text}
-              </HeadingTag>
-            );
-            
-          case 'paragraph':
-            const text = maxLength && block.text.length > maxLength 
-              ? block.text.substring(0, maxLength) + '...' 
-              : block.text;
-            return (
-              <p key={idx} className="text-paragraph">
-                {text}
-              </p>
-            );
-            
-          case 'list':
-            const ListTag = block.ordered ? 'ol' : 'ul';
-            return (
-              <ListTag key={idx} className="text-list">
-                {block.items.map((item, i) => (
-                  <li key={i}>{item}</li>
-                ))}
-              </ListTag>
-            );
-            
-          case 'table':
-            return (
-              <div key={idx} className="table-container">
-                <table className="text-table">
-                  <thead>
-                    <tr>
-                      {block.headers.map((header, i) => (
-                        <th key={i}>{header}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {block.rows.map((row, i) => (
-                      <tr key={i}>
-                        {row.map((cell, j) => (
-                          <td key={j}>{cell}</td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            );
-            
-          default:
-            return null;
-        }
-      })}
-    </div>
-  );
-};
-
-export default TextRenderer;
-
-/* Execution Results Page Styling */
-.execution-results-page {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100vh;
-  background-color: #f8f9fa;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-/* Header */
-.results-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 20px 24px;
-  background: linear-gradient(135deg, #5A287D 0%, #7B3FA0 100%);
-  color: white;
-  box-shadow: 0 4px 12px rgba(90, 40, 125, 0.15);
-  border-bottom: 1px solid #e0d4e7;
-}
-
-.header-info {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.results-title {
-  margin: 0;
-  font-size: 24px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-}
-
-.execution-info {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  font-size: 14px;
-  opacity: 0.9;
-}
-
-.execution-id {
-  font-family: 'Consolas', 'Monaco', monospace;
-  background: rgba(255, 255, 255, 0.2);
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-weight: 500;
-}
-
-.execution-count {
-  font-weight: 500;
-}
-
-.header-controls {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-/* View Toggle */
-.view-toggle {
-  display: flex;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  padding: 2px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-}
-
-.view-btn {
-  background: transparent;
-  border: none;
-  color: white;
-  padding: 8px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  font-size: 16px;
-  opacity: 0.7;
-}
-
-.view-btn:hover {
-  opacity: 1;
-  background: rgba(255, 255, 255, 0.15);
-}
-
-.view-btn.active {
-  background: rgba(255, 255, 255, 0.25);
-  opacity: 1;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
-
-.view-btn:focus {
-  outline: 2px solid rgba(255, 255, 255, 0.5);
-  outline-offset: 2px;
-}
-
-/* Export Button */
-.export-btn {
-  background: rgba(255, 255, 255, 0.9);
-  color: #5A287D;
-  border: none;
-  padding: 10px 16px;
-  border-radius: 8px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 14px;
-}
-
-.export-btn:hover:not(:disabled) {
-  background: white;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-}
-
-.export-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
-}
-
-.export-btn:focus {
-  outline: 2px solid rgba(255, 255, 255, 0.5);
-  outline-offset: 2px;
-}
-
-/* Stats Bar */
-.stats-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 24px;
-  background-color: white;
-  border-bottom: 1px solid #e0d4e7;
+  margin-top: 20px;
+  background-color: #fff;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
 }
 
-.stats-section {
+.execution-table th,
+.execution-table td {
+  padding: 12px;
+  border-bottom: 1px solid #ddd;
+  text-align: left;
+}
+
+.status-badge {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-weight: bold;
+  font-size: 12px;
+  color: white;
+  flex-shrink: 0;
+  /* Prevents the badge from shrinking */
+}
+
+.status-badge.PASS {
+  background-color: #28a745;
+}
+
+.status-badge.FAIL {
+  background-color: #a54952;
+}
+
+.split-view {
   display: flex;
-  align-items: center;
+  margin-top: 20px;
+  border-top: 1px solid #ccc;
+  padding-top: 20px;
+}
+.split-view-container {
+    display: flex;
+    gap: 1rem;
+    height: 600px; /* or your preferred height */
+    font-family: Arial, sans-serif;
+}
+.prompt-list {
+    flex: 0 0 45%; /* Approximately 45% width */
+    max-width: 45%;
+    overflow-y: auto;
+    border-right: 1px solid #ccc;
+    padding-right: 1rem;
+}
+
+.prompt-item {
+  padding: 10px;
+  cursor: pointer;
+  border-bottom: 1px solid #eee;
+  display: flex;
+  flex-direction: column;
+  /* Change to vertical layout */
   gap: 8px;
 }
-
-.stat-label {
-  font-weight: 600;
-  color: #5A287D;
-  font-size: 13px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+.prompt-item.active {
+  background-color: #e2d8fa;
+  border-left: 4px solid #5A287D;
+  box-shadow: inset 0 0 8px rgba(90, 40, 125, 0.2);
 }
 
-.stat-value {
-  color: #2c3e50;
-  font-size: 14px;
-  font-weight: 500;
+.prompt-item:focus-within,
+.prompt-item[tabindex="0"]:focus {
+  outline: 2px solid #5A287D;
+  outline-offset: 2px;
 }
 
-.stat-value.status.success {
-  color: #16a085;
-}
 
-.stat-value.status.warning {
-  color: #f39c12;
-}
-
-/* Main Content */
-.results-content {
-  flex: 1;
-  padding: 20px 24px;
-  overflow: hidden;
+.prompt-title {
   display: flex;
-  flex-direction: column;
-}
-
-/* View Styles */
-.fullscreen-view {
-  flex: 1;
-  background: white;
-  border-radius: 12px;
-  box-shadow: 0 4px 12px rgba(90, 40, 125, 0.1);
-  overflow: hidden;
-  border: 1px solid #e0d4e7;
-}
-
-.fullscreen-content {
-  padding: 24px;
-  height: 100%;
-  overflow-y: auto;
-}
-
-.fullscreen-content h3 {
-  margin: 0 0 20px 0;
-  color: #5A287D;
-  font-size: 18px;
-  font-weight: 600;
-}
-
-.fullscreen-text {
-  font-family: 'Consolas', 'Monaco', monospace;
-  font-size: 13px;
-  line-height: 1.5;
-  background-color: #f8f9fa;
-  padding: 20px;
-  border-radius: 8px;
-  border: 1px solid #e9ecef;
-  white-space: pre-wrap;
-  overflow-x: auto;
-}
-
-.comparison-view {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-}
-
-.comparison-header {
-  padding: 16px 0;
-  border-bottom: 1px solid #e0d4e7;
-  margin-bottom: 20px;
-}
-
-.comparison-header h3 {
-  margin: 0;
-  color: #5A287D;
-  font-size: 18px;
-  font-weight: 600;
-}
-
-/* No Results State */
-.no-results {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  color: #6c757d;
-  background: white;
-  border-radius: 12px;
-  border: 2px dashed #d1d5db;
-  margin: 20px 0;
-}
-
-.no-results-icon {
-  font-size: 64px;
-  margin-bottom: 16px;
-  opacity: 0.5;
-}
-
-.no-results h3 {
-  color: #495057;
-  margin: 0 0 12px 0;
-  font-size: 20px;
-  font-weight: 600;
-}
-
-.no-results p {
-  margin: 0 0 8px 0;
-  font-size: 14px;
-  line-height: 1.5;
-  max-width: 400px;
-}
-
-/* Footer */
-.results-footer {
-  padding: 12px 24px;
-  background-color: white;
-  border-top: 1px solid #e0d4e7;
-  box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.05);
-}
-
-.footer-info {
-  display: flex;
-  align-items: center;
   justify-content: space-between;
-  font-size: 12px;
-  color: #6c757d;
+  align-items: center;
 }
 
-.footer-info span {
-  font-weight: 500;
+.prompt-text {
+  margin: 0;
+  font-size: 14px;
+  color: #0f0f0f;
+  line-height: 1.4;
 }
 
-/* Responsive Design */
-@media (max-width: 768px) {
-  .results-header {
-    padding: 16px 20px;
+
+.prompt-item.active {
+  background-color: #f9f8fc;
+}
+
+.prompt-details {
+  flex: 1 1 55%;  /* Remaining width */
+    overflow-y: auto;
+    padding-left: 1rem;
+    display: flex;
     flex-direction: column;
-    align-items: stretch;
-    gap: 16px;
-  }
-  
-  .header-info {
-    align-items: center;
-    text-align: center;
-  }
-  
-  .results-title {
-    font-size: 20px;
-  }
-  
-  .execution-info {
-    justify-content: center;
-  }
-  
-  .header-controls {
-    justify-content: center;
-  }
-  
-  .stats-bar {
+    width: 100%;
+}
+.prompt-details > * {
+    width: 100%;
+}
+.prompt-details .tab-content {
+    flex-grow: 1;
+}
+
+.tab-content,
+.metrics-table,
+.comparison-column-text,
+.final-reason-markdown {
+    width: 100%;
+    max-width: 100%;
+    color: #050505;
+}
+
+.prompt-details h4 {
+  margin-top: 10px;
+  margin-bottom: 4px;
+  font-size: 16px;
+  color: #0c0c0c;
+}
+
+.prompt-details p {
+  margin: 0;
+  font-size: 14px;
+  color: #0e0d0d;
+}
+
+.prompt-details ul {
+  padding-left: 20px;
+  font-size: 14px;
+  color: #070707;
+}
+.tab-navigation {
+    display: flex;
+    border-bottom: 1px solid #dddddd;
+    margin-bottom: 20px;
+}
+
+.tab-button {
     padding: 10px 20px;
-    flex-direction: column;
-    gap: 8px;
-  }
-  
-  .results-content {
-    padding: 16px 20px;
-  }
-  
-  .footer-info {
-    flex-direction: column;
-    gap: 4px;
-    text-align: center;
-  }
+    border: none;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.3s ease;
 }
 
-@media (max-width: 480px) {
-  .results-header {
-    padding: 12px 16px;
-  }
-  
-  .results-title {
-    font-size: 18px;
-  }
-  
-  .execution-info {
-    flex-direction: column;
-    gap: 4px;
-  }
-  
-  .view-toggle {
-    padding: 1px;
-  }
-  
-  .view-btn {
-    padding: 6px 10px;
-    font-size: 14px;
-  }
-  
-  .export-btn {
-    padding: 8px 12px;
-    font-size: 13px;
-  }
-  
-  .stats-bar {
-    padding: 8px 16px;
-  }
-  
-  .results-content {
-    padding: 12px 16px;
-  }
-  
-  .fullscreen-content {
-    padding: 16px;
-  }
-  
-  .no-results-icon {
-    font-size: 48px;
-  }
-  
-  .no-results h3 {
-    font-size: 18px;
-  }
+.tab-button:hover {
+    background-color: #f5f5f5;
 }
 
-/* Accessibility Improvements */
-@media (prefers-reduced-motion: reduce) {
-  .view-btn,
-  .export-btn {
-    transition: none;
-  }
+.tab-button.active {
+    border-bottom-color: #391552;
+    background-color: #391552;
+    color: #391552;;
+    font-weight: 600;
 }
 
-/* High Contrast Mode */
-@media (prefers-contrast: high) {
-  .results-header {
-    background: #000000;
-    border-bottom: 3px solid #ffffff;
-  }
-  
-  .view-btn.active,
-  .export-btn {
-    background: #ffffff;
-    color: #000000;
-    border: 2px solid #000000;
-  }
-  
-  .stats-bar,
-  .results-footer {
-    background: #ffffff;
-    border: 1px solid #000000;
-  }
+.tab-content {
+    min-height: 200px;
 }
 
-/* Print Styles */
-@media print {
-  .execution-results-page {
-    height: auto;
-  }
-  
-  .results-header {
-    background: #000000 !important;
-    color: #ffffff !important;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-  
-  .header-controls {
-    display: none;
-  }
-  
-  .stats-bar {
-    border: 1px solid #000000;
-  }
-  
-  .results-content {
-    padding: 0;
-  }
-  
-  .results-footer {
-    border-top: 1px solid #000000;
-  }
-  
-  .no-results {
-    border: 1px solid #000000;
-  }
+.tab-panel {
+    animation: fadeIn 0.3s ease-in;
 }
 
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+.final-reason-markdown h1, h2, h3, h4, h5, h6 {
+  color: #42145F;
+  font-weight: bold;
+  margin: 8px 0;
+}
 
+.final-reason-markdown strong {
+  color: #5A287D;
+}
+
+.final-reason-markdown p {
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  color: #050505;
+}
+
+.final-reason-markdown ul, .final-reason-markdown ol {
+  margin-left: 20px;
+}
+
+.final-reason-markdown li {
+  margin-bottom: 4px;
+}
+/* Container for markdown-rendered content (e.g., final reason, responses) */
+.markdown-content,
+.final-reason-markdown,
+.comparison-column-text {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  width: 100%;
+  max-width: 100%;
+  color: #222222;
+  white-space: pre-wrap; /* Preserve whitespace and line breaks */
+  margin-bottom: 1rem;
+}
+
+/* Headings (h1 to h6) in markdown */
+.markdown-content h1,
+.final-reason-markdown h1,
+.comparison-column-text h1 {
+  font-size: 1.75rem;
+  color: #5A287D; /* Dark blue */
+  font-weight: 700;
+  margin: 1rem 0 0.5rem 0;
+  border-bottom: 2px solid #5A287D;
+  padding-bottom: 0.25rem;
+}
+
+.markdown-content h2,
+.final-reason-markdown h2,
+.comparison-column-text h2 {
+  font-size: 1.5rem;
+  color: #5A287D; /* Slightly lighter blue */
+  font-weight: 700;
+  margin: 1rem 0 0.5rem 0;
+  border-bottom: 1px solid #5A287D;
+  padding-bottom: 0.2rem;
+}
+
+.markdown-content h3,
+.final-reason-markdown h3,
+.comparison-column-text h3 {
+  font-size: 1.25rem;
+  color: #5A287D; /* Medium blue */
+  font-weight: 700;
+  margin: 0.75rem 0 0.4rem 0;
+}
+
+/* Strong/bold text */
+.markdown-content strong,
+.final-reason-markdown strong,
+.comparison-column-text strong {
+  color: #5A287D; /* Bright blue */
+  font-weight: 700;
+}
+
+/* Emphasis/italic text */
+.markdown-content em,
+.final-reason-markdown em,
+.comparison-column-text em {
+  font-style: italic;
+  color: #555555;
+}
+
+/* Paragraphs */
+.markdown-content p,
+.final-reason-markdown p,
+.comparison-column-text p {
+  margin: 0.5rem 0;
+}
+
+/* Lists */
+.markdown-content ul,
+.final-reason-markdown ul,
+.comparison-column-text ul,
+.markdown-content ol,
+.final-reason-markdown ol,
+.comparison-column-text ol {
+  margin-left: 1.5rem;
+  margin-bottom: 1rem;
+  padding-left: 0;
+  color: #0e0d0d;
+}
+
+.markdown-content li,
+.final-reason-markdown li,
+.comparison-column-text li {
+  margin-bottom: 0.4rem;
+}
+
+/* Links */
+.markdown-content a,
+.final-reason-markdown a,
+.comparison-column-text a {
+  color: #5A287D;
+  text-decoration: underline;
+}
+.markdown-content a:hover,
+.final-reason-markdown a:hover,
+.comparison-column-text a:hover {
+  color: #0055a5;
+}
+
+/* Tables in markdown (if any) */
+.markdown-content table,
+.final-reason-markdown table,
+.comparison-column-text table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+  font-size: 13px;
+}
+
+.markdown-content th,
+.final-reason-markdown th,
+.comparison-column-text th {
+  background-color: #5A287D;
+  color: white;
+  padding: 8px 12px;
+  text-align: left;
+  border: 1px solid #dddddd;
+}
+
+.markdown-content td,
+.final-reason-markdown td,
+.comparison-column-text td {
+  border: 1px solid #dddddd;
+  padding: 8px 12px;
+  vertical-align: top;
+}
+
+/* Alternate row colouring for tables */
+.markdown-content tr:nth-child(even),
+.final-reason-markdown tr:nth-child(even),
+.comparison-column-text tr:nth-child(even) {
+  background-color: #f9f9f9;
+}
+
+/* Cursor pointer for expandable markdown sections */
+.final-reason-markdown[role="button"],
+.comparison-column-text[role="button"] {
+  cursor: pointer;
+  outline: none;
+}
+
+/* Focus outline for accessibility */
+.final-reason-markdown[role="button"]:focus,
+.comparison-column-text[role="button"]:focus {
+  outline: 2px solid #5A287D;
+  outline-offset: 2px;
+}
+.comparison-columns-container-vertical {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem; /* space between the responses */
+}
+/* Execution Info Table */
+.execution-info-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.5rem;
+  font-size: 14px;
+}
+
+.execution-info-table th {
+  background-color: #5A287D;
+  color: white;
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid #ddd;
+}
+
+.execution-info-table td {
+  border: 1px solid #ddd;
+  padding: 10px 12px;
+  vertical-align: middle;
+  color: #070707;
+}
+
+/* Metrics Table */
+.metrics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.metrics-table th {
+  background-color: #5A287D;
+  color: white;
+  padding: 8px 12px;
+  text-align: left;
+  border: 1px solid #ccc;
+}
+
+.metrics-table td {
+  border: 1px solid #ccc;
+  padding: 8px 12px;
+  vertical-align: top;
+  color: #050505;
+}
+
+/* Alternate row colour for metrics table */
+.metrics-table tr:nth-child(even) {
+  background-color: #f0f4fb;
+}
+
+/* Status badge styling (reuse your existing badge styles if any) */
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: white;
+  text-transform: capitalize;
+}
+
+.status-badge.success {
+  background-color: #28a745;
+}
+
+.status-badge.failed {
+  background-color: #dc3545;
+}
+
+.status-badge.pending {
+  background-color: #ffc107;
+  color: #212529;
+}
+
+/* Section headers used in UI */
+.section-header {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #5A287D;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  border-bottom: 2px solid #5A287D;
+  padding-bottom: 0.25rem;
+}
+
+/* Tab navigation buttons */
+.tab-navigation {
+  margin-bottom: 1rem;
+}
+
+.tab-button {
+  background: none;
+  border: none;
+  padding: 8px 16px;
+  font-size: 14px;
+  color: #5A287D;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-right: 12px;
+  font-weight: 600;
+}
+
+.tab-button.active {
+  border-color: 42145F;
+  color: 42145F;
+  font-weight: 700;
+}
+
+.tab-button:hover:not(.active) {
+  color: 42145F;
+}
+
+/* Scrollbar for long text boxes if needed */
+.markdown-content,
+.final-reason-markdown,
+.comparison-column-text {
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: 10px;
+}
+
+i recieve object from backend to be displaeyf in pdf document
+first section of ducment should display basic info about execution - i liek the current styling from the generatepdf code can keep this way
+from execution config display only - browser, and if headless, and environment, and number or prompts and dataset type
+dotn display metrics threshold
+displa ywhen started whe nexecyted in goo dtime format
+
+Then 2nd seciton i ndocument shoul display results array. map through it and display each result this way:
+Status -
+Reason - (final_reason) - this can be long text - see the example, need to be displayed well
+Prompt text: this can be any type of text as well, can be plain text or any as in example
+Ideal response
+Actual response
+Metrics in table the way they are now is ok
+
+then last section below all results will be table with metrics for whoel execution - it will be same as for metrics in each result
+{
+    "execution_id": "1e3a9b16-df19b1f0",
+    "aidlet_id": "81ebaefd-9c80-9",
+    "dataset_id": nul,
+    "status": "FAIL",
+    "executed_by": "hajjv",
+    "model": "GPT-4.1",
+    "execution_config": {
+        "browser": "msedge",
+        "metrics": {
+            "relevance": true,
+            "moderation": true,
+            "usefulness": true,
+            "frustration": false,
+            "hallucination": true,
+            "context-recall": true,
+            "context-precision": true,
+            "semantic-equivalence": true,
+            "session-completeness": false,
+            "conversational-coherence": false
+        },
+        "headless": false,
+        "environment": "sit",
+        "num_prompts": 10,
+        "dataset_type": "experimental",
+        "metrics_threshold": {
+        }
+    },
+    "started_at": "2025-10-29T15:27:57.145782",
+    "finished_at": "2025-10-29T15:40:01.869372",
+    "created_at": "2025-10-29T15:27:57.145782",
+    "results": [
+        {
+            "result_id": "5d9937b2-68eb-4105-a649-9e5b7b409e5d",
+            "execution_id": "1e3a9b16-df22-40ee-9a3a-16710619b1f0",
+            "prompt_id": null,
+            "prompt_text": "Agent 00:02 Good afternoon. You're through to Debra from the  profile team. May I please start by taking your\nreference number. Customer 00:10 Will that be on the letter? Agent 00:12 Yes, it starts with an IL 00. Customer 00:16 Hold on, um,\nyeah, IL 0046. Agent 00:23 Thank you. Agent 00:25 Let me pull up the details. Agent 00:36 Alright, please confirm the business\nname for me. Customer 00:41 It's vital recovery services. Agent 00:44 Thank you and please confirm your own name. Customer\n00:44 Limited. Customer 00:48 I'm h Agent 00:50 Alright, I'm going to take you through security before we proceed. Do\nyou do online banking on this account? Customer 00:55 Mhm Customer 00:58 yeah Agent 01:00 Do you have access to your 10\ndigit customer number. Customer 01:04 Do I have a Agent 01:06 A 10 digit customer number that starts with your date of birth.\nCustomer 01:06 sorry, I can't hear you, the line's a bit bad. Customer 01:10 Yes, 302. Agent 01:13 Alright. Agent 01:15\n30, 10. Customer 01:16 3,301,070 Customer 01:20 1202. Agent 01:23 Alright, thank you Agent 01:28 The bank will never ask you for\nthe full digits of your online banking PIN. If I may please have only the digits. Customer 01:39 OK, 1\nCustomer 01:41 and ndid you say Agent 01:43 Yes. Customer 01:44 ? Agent 01:50 Alright, and um security are done.\nAgent 01:54 If by any chance the call drops, am I OK to call you back on this number? Agent 01:58 ending in 5 Customer 01:58 Yes\nAgent 02:00 OK Agent 02:01 You have two numbers Customer 02:05 Yeah, this, this one it would be better to call me on. Agent\n02:09 Alright, no problem Agent 02:14 And your email is info@vitarecovery Services.com. Customer 02:18 Yeah. Agent 02:20 Alright,\num Customer 02:22 Mhm. Customer 02:25 Is this just regarding a review because I'm sure I did the review already. Agent 02:25\nprobably will Customer 02:29 but never mind Customer 02:30 we'll just do it cos I received another letter. Agent 02:33 OK, I'll take a\nlook to see if further information is needed. Customer 02:39 mm. Agent 02:40 OK, pending. OK, somebody needs to give you a call.\nAgent 02:46 Outcome That's why. Um, do you mind if I place you on hold? I will give the team a call to know whether any of them is\navailable to talk to you. Customer 02:55 So what is it regarding? it's just Customer 02:57 a a routine review Agent 02:59 Yes, I think\nthey just need to Customer 02:59 Is it gonna take a long while? Agent 03:02 OK, it's about the questions that you answered. Agent\n03:07 You made a mistake. In in the ownership structure where they ask you, do you have any nominee holders. You said yes.\nCustomer 03:12 Mhm. Agent 03:16 So it's not asking, do you really have domini shareholders. Agent 03:20 or was it like maybe you\ndidn't understand the Agent 03:24 question Customer 03:24 the question Customer 03:26 mm Agent 03:30 So I can um pass your\ncall to them now if you don't mind. Customer 03:36 so that question, the ownership, say that again. Agent 03:40 The nominee\nshareholding you answer it and say yes. Agent 03:44 So they just want to confirm. Customer 03:45 the nomination Agent 03:47 that\nif you really have nominee shareholders or maybe you didn't just understand the question and you chose yes. Customer 03:54 OK.\nCustomer 03:55 can, uh, somebody called me back because I'm just about to go into a meeting at 4. Agent 04:02 Um, let me see.\nCustomer 04:02 um Customer 04:03 and I don't Customer 04:04 I don't really wanna be on the phone. Customer 04:06 and um I'm\nin the meeting, do you know what I mean? Agent 04:09 Um yes Customer 04:09 there a possibility somebody can call back or.\nAgent 04:12 but it has to be tomorrow Customer 04:13 or can I call back Agent 04:16 When do you finish your meeting Customer\n04:19 It might be about 1 hour 5. Agent 04:21 Uh no, they're closed by 5. So I, I can book an appointment. They're closed by 5.\nCustomer 04:25 What time do they close Customer 04:29 OK Agent 04:30 Yes, so Customer 04:31 I'm just thinking in case I missed\nthe meeting early, could I call back? Agent 04:34 unless you can come tomorrow morning. Agent 04:37 We open by 9 Customer\n04:43 or if you do a call back cos the letter states I have to get in contact by the twenty-eighth, which is tomorrow. Customer 04:50\nCan you organise a call back then? Agent 04:53 Yes, but if I, if I'm organising Customer 04:53 or it's better I just call Agent 04:55 if\nI'm organising a callback, it has to be from 2:30 tomorrow, which will risk your account being restricted. But if you can call in by 9,\nwe can transfer your calls straight to them. Customer 05:08 Mhm. Customer 05:10 I just wanna know if it's gonna be a quick one,\nI'll just um Customer 05:15 answer the question now Agent 05:17 It, it will be really quick. It's not, it's just to confirm and then they'll\ntell you what you need to do, then they will transfer the portal back to you to make the corrections. That's just it's not a difficult\none. Customer 05:27 OK. Customer 05:31 OK, we'll do it now quickly there. Agent 05:33 OK, let me check if any of them is\navailable. One second. Customer 05:36 Thank you Customer 05:38 You are on hold Customer 05:50 You are. Customer 05:57 calls\nare recorded for training and quality purposes. Customer 06:14 Now, you're through to Louis and the outbound team. How can I\nhelp? Agent 06:17 Oh, Louie, Louie, Louis. Thank God it's you. Customer 06:20 Who else? Who else Agent 06:24 All right, so Debra\nCustomer 06:26 Uh Agent 06:26 Let's do this quick. Customer is about to go into a meeting. Customer 06:30 OK, alright, no worries.\nUm, I've just sent you a thing on the. Agent 06:31 Oh Agent 06:33 the best picture, I'm going to change it soon. I'll change it.\nCustomer 06:36 There should not change it. Alright, uh, vato recovery Services Limited. We've got Paulette Bligh. Agent 06:43 Yeah\nAgent 06:44 Yes, yes Customer 06:45 All right, go on. I'll just, all right, go on, just pop through. I'll just pull it up as I'm doing it. Yeah,\nput it through it's fine. Agent 06:49 Yeah, it's also the nominee shareholding thing, I think. Customer 06:51 Uh, yeah, that is, yeah,\nyou're right, yeah, spot on, yeah, put it through, it's all good. Agent 06:55 Alright, I'll let her know now and put it through. Customer\n06:57 Cheers, perfect that. Agent 07:01 Thank you for holding Customer 07:03 OK hi Agent 07:04 Alright, um, I have my colleague\non the line. His name is Lewis. He's going to take you through the questions and and tell you what you need to do. I told him you\nhave to get into a meeting soon, so he needs to be fast. Customer 07:16 OK, lovely. Thank you so much. Agent 07:18 No problem.\nThank you. Bye. Customer 07:20 You're welcome, bye Connection Connected at Aug 27, 2025, 03:50:26 pm Customer endpoint type\nTELEPHONE_NUMBER Customer endpoint +447939894013 System endpoint +443452462770 System endpoint type\nTELEPHONE_NUMBER Queue Queue customer-fincrime-cddcontact-sil-nwb-q Duration 00:00:06 Enqueued at Aug 27, 2025,\n03:50:44 pm Dequeued at Aug 27, 2025, 03:50:51 pm Agent connection attempts 1 Agent Name (last, first) Eze, Deborah Username\n8211827 Connected to agent at Aug 27, 2025, 03:50:51 pm Interaction duration 00:06:00 Hold duration 00:01:22 Number of holds 1\nLongest hold 00:01:22 ACW start Aug 27, 2025, 03:58:13 pm ACW end Aug 27, 2025, 03:58:43 pm ACW duration 00:00:30 Routing\nprofile customer-fincrime-cddcontact-sil-rp Agent hierarchy Fin Crime / CDD Customer Support / Mark Moscrop / Charles Bridges /\nHolly Thompson Transfer Transfer completed at Aug 27, 2025, 03:58:13 pm Contact tags aws:connect:instanceId f27bf286-d9c2-\n472f-a1af-8942d059ff33 aws:connect:systemEndpoint +443452462770 Contact attributes AUDIO_STREAM_ARN\narn:aws:kinesisvideo:eu-west-2:031737927483:stream/live-media-streaming-connect-customer-ops-prod-eu-west-2-contact\u0002c3a96c9e-e2e3-4b9d-8d82-6f9af32fb864/1696296642499 access our
+            "actual_response": "# Overall DeBehavioural Assessment\n\nDah demonstrated professionalism, confidence, and ownership throughout the call. She complied with bank policies, handled data securely, and maintained a positive tone. With additional warmth and personalisation, her performance would be exemplary.\n\n* * *\n",
+            "status": "FAIL",
+            "final_reason": "The ACTUAL_OUTPUT provides a very high-level summary of Deh Ee's behaviour, noting professionalism, confidence, ownership, compliance, and a positive tone, and suggests that more warmth and personalisation would improve performance. However, it omits nearly all of the critical details, facts, and structured assessment present in the EXPECTED_OUTPUT. Specifically, it does not include: (1) call metadata (ID, date, duration, customer/agent names, etc.), (2) customer verification details, (3) a section-by-section breakdown of performance with scores, (4) specific examples of agent behaviour, (5) explicit strengths and areas for development, or (6) any reference to the scoring rubric or overall call score. The ACTUAL_OUTPUT is factually correct in its general statements but fails to preserve the depth, structure, and key information of the EXPECTED_OUTPUT. This is a significant omission, warranting a low score.",
+            "model": "GPT-4.1",
+            "result_config": {},
+            "metrics": [
+                {
+                    "metric_id": "40d4145d-7015-4d3f-ba26-b3649157f804",
+                    "execution_id": "1e3a9b16-df22-40ee-9a3a-16710619b1f0",
+                    "result_id": "5d9937b2-68eb-4105-a649-9e5b7b409e5d",
+                    "name": "semantic-equivalence",
+                    "score": 0.3,
+                    "status": "FAIL",
+                    "reason": "The ACTUAL_OUTPUT provides a very high-level summary of Deborah Eze's behaviour, noting professionalism, confidence, ownership, compliance, and a positive tone, and suggests that more warmth and personalisation would improve performance. However, it omits nearly all of the critical details, facts, and structured assessment present in the EXPECTED_OUTPUT. Specifically, it does not include: (1) call metadata (ID, date, duration, customer/agent names, etc.), (2) customer verification details, (3) a section-by-section breakdown of performance with scores, (4) specific examples of agent behaviour, (5) explicit strengths and areas for development, or (6) any reference to the scoring rubric or overall call score. The ACTUAL_OUTPUT is factually correct in its general statements but fails to preserve the depth, structure, and key information of the EXPECTED_OUTPUT. This is a significant omission, warranting a low score.",
+                    "details": {},
+                    "created_at": "2025-10-29T15:28:43.738696"
+                },
+                {
+                    "metric_id": "ec070ed5-59ea-40d4-ae02-99c23ebcbcd9",
+                    "execution_id": "1e3a9b16-df22-40ee-9a3a-16710619b1f0",
+                    "result_id": "5d9937b2-68eb-4105-a649-9e5b7b409e5d",
+                    "name": "relevance",
+                    "score": 0.4,
+                    "status": "FAIL",
+                    "reason": "The answer provides a general behavioral assessment of Deborah Eze, mentioning professionalism, compliance, and tone. However, it does not reference or analyze any specific details or events from the provided call transcript. The assessment is generic and lacks direct evidence or examples from the interaction, making it only partially relevant to the user's input, which is a detailed call log. More specific references to the call would improve relevance.",
+                    "details": {},
+                    "created_at": "2025-10-29T15:28:49.434587"
+                },
+                {
+                    "metric_id": "d51b9463-3d69-48be-aee8-d87bf8e6bdfc",
+                    "execution_id": "1e3a9b16-df22-40ee-9a3a-16710619b1f0",
+                    "result_id": "5d9937b2-68eb-4105-a649-9e5b7b409e5d",
+                    "name": "moderation",
+                    "score": 0.0,
+                    "status": "PASS",
+                    "reason": "No content policy violations detected in the text. The content is a professional assessment and appears to be completely safe.",
+                    "details": {},
+                    "created_at": "2025-10-29T15:28:52.518877"
+                },
+                
+            ],
+            "created_at": "2025-10-29T15:28:43.689117"
+        },
+        
+        }
+    ],
+    "metrics": []
+}
 
